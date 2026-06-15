@@ -90,6 +90,7 @@ ALLOWED_TAGS = {
     "google-sheets",
     # data movement patterns
     "ingest",
+    "export",
     "migrate",
 }
 ALLOWED_KEYS = {
