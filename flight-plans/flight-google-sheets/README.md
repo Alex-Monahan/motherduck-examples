@@ -3,27 +3,25 @@ title: Sync Google Sheets and MotherDuck With a Flight
 id: flight-google-sheets
 description: >-
   A reusable Flight that syncs data both ways between Google Sheets and
-  MotherDuck through the DuckDB gsheets community extension: import a list of
+  MotherDuck through the DuckDB gsheets community extension. Import a list of
   sheets into MotherDuck tables, and export query results back to sheet tabs as
   reverse ETL. Both directions are full-refresh and idempotent, with per-item
   retries and an audit log. Use it to pull business data out of spreadsheets and
   push curated data back into them for business process automation.
 type: template
-category: integrations
+category: ingestion
 features: [flights]
-tags: [google-sheets, ingest]
+tags: [google-sheets, ingest, export]
 ---
 
 # Sync Google Sheets and MotherDuck With a Flight
 
-Spreadsheets are where a lot of real business data actually lives — budgets a
-finance team maintains by hand, a list of target accounts sales is working,
-vendor terms, headcount plans, regional price overrides. This Flight brings that
-data into MotherDuck so it can join your warehouse tables, and pushes results
-back out to Google Sheets so the people who live in spreadsheets keep working
+Spreadsheets are where a lot of real business data actually lives. 
+This Flight brings that data into MotherDuck so it can join your warehouse tables, 
+and pushes results back out to Google Sheets so the people who live in spreadsheets keep working
 where they already are.
 
-The "push back out" direction is **reverse ETL**: you run a query in MotherDuck
+The export direction is **reverse ETL**: you run a query in MotherDuck
 and land the result on a Google Sheet tab. That is what turns a warehouse into
 **business process automation** — a scheduled Flight can refresh a "top accounts
 to call today" tab, a per-region inventory sheet, or a finance reconciliation
@@ -33,8 +31,7 @@ ingest, a pure reverse-ETL publish, or a full round trip.
 
 At a high level you give the Flight two lists: which sheets to **import** (each
 becomes a MotherDuck table) and which queries to **export** (each result
-overwrites a sheet tab). Everything else — credentials, retries, the audit log —
-is handled for you.
+overwrites a sheet tab).
 
 ## How it works
 
@@ -43,15 +40,11 @@ for the common cases. One run does:
 
 1. **Validate config and credentials, then connect.** The Google service-account
    key is read from a MotherDuck **Flights secret** and registered with the
-   `gsheets` extension **in memory** (never written to disk). Bad config or a
-   missing key exits cleanly before any work is attempted.
+   `gsheets` extension **in memory**.
 2. **Import each configured sheet** with one atomic statement:
    `CREATE OR REPLACE TABLE <db>.<schema>.<table> AS SELECT * FROM read_gsheet('<url>')`.
-   This runs on the MotherDuck connection (the extension executes client-side),
-   so it is ATOMIC (swaps in one step), IDEMPOTENT (no watermark to drift), and
-   STREAMING.
 3. **Export each configured query** by running the SELECT on MotherDuck,
-   materializing the (sheet-sized) result as an Arrow table, and copying it to
+   materializing the (small sheet-sized) result as an Arrow table, and copying it to
    the destination tab with `COPY ... TO '<url>' (FORMAT gsheet, OVERWRITE_SHEET TRUE)`.
    `OVERWRITE_SHEET` keeps re-runs idempotent.
 4. **Isolate, retry, and audit every item.** Each import/export is retried with
@@ -59,11 +52,6 @@ for the common cases. One run does:
    item — success or failure — is recorded in
    `<TARGET_DATABASE>.main.gsheets_sync_log`, and the run exits non-zero if
    anything failed after retries.
-
-Sheet writes use a second, local DuckDB connection on purpose: `COPY (FORMAT
-gsheet)` cannot be resolved on a connection with the MotherDuck extension loaded,
-so the import side runs on `md:` and the export's final write runs locally, with
-an Arrow table bridging the two.
 
 ## Questions to answer
 
@@ -83,13 +71,11 @@ an Arrow table bridging the two.
 
 - **Service accounts have zero Drive storage quota** (Google policy since 2025),
   so the service account cannot create or own spreadsheets. Every source and
-  destination sheet must be owned by a person (or a Shared Drive) and **shared
-  with the service account's `client_email`**: Viewer is enough for sources,
+  destination sheet must be owned by a person (or a Shared Drive) and shared
+  with the service account's `client_email`: **Viewer** is enough for sources,
   **Editor** for destinations.
 - **Full refresh, both directions.** Imports replace the whole table; exports
-  overwrite the whole tab. Updates and deletes are reflected, but this is not an
-  append/CDC pattern — for very large or high-churn tables, use a different
-  template.
+  overwrite the whole tab. 
 - **Destination sheets must exist** unless the export sets `create_sheet: true`,
   which creates the tab if missing.
 - **Sheet size limits.** A Google spreadsheet holds at most 10M cells; exports
@@ -135,8 +121,13 @@ EXPORTS = [
 ## Run it
 
 You need a MotherDuck account and token, and a Google service-account key whose
-`client_email` has been shared on the sheets you reference. For a local run,
-inject the key the same way the Flights secret would:
+`client_email` has been shared on the sheets you reference. 
+
+To create and set up a Google service-account and key, ask your agent! Or use these references:
+* [DuckDB GSheets extension docs for getting a token](https://duckdb-gsheets.com/#getting-a-google-api-access-token)
+* [Docs for creating a Google Service Account](https://docs.cloud.google.com/iam/docs/service-accounts-create)
+
+For a local run, inject the key the same way the Flights secret would:
 
 ```bash
 export MOTHERDUCK_TOKEN=your_token_here
@@ -190,8 +181,7 @@ user whether a schedule is desired and what cadence fits the data.
 
 - **Key in a secret, in memory only.** The service-account key comes from a `TYPE
   flights` secret and is registered with the extension inline (`EMAIL`/`SECRET`),
-  never written to disk and never logged. Plain Flight `config` is not treated as
-  sensitive, so the key never goes there.
+  never written to disk and never logged.
 - **Quoted identifiers and escaped literals.** Config-supplied database/schema/
   table names flow into SQL via `quote_ident()`, and sheet URLs/options via a
   single-quote-escaping `sql_str()` — preventing SQL injection.
