@@ -95,6 +95,13 @@ def resolve_token() -> str:
     )
 
 
+def quote_ident(ident: str) -> str:
+    """Quote a SQL identifier, doubling any embedded double quote so the value can
+    never break out of its quoted position (defense-in-depth alongside
+    validate_table)."""
+    return '"' + ident.replace('"', '""') + '"'
+
+
 def validate_table(value: str) -> str:
     """Validate a 'database.schema.table' name so it is safe to interpolate into
     SQL that cannot be parameterized (the audit ledger target)."""
@@ -221,12 +228,13 @@ class HubSpot:
 # --------------------------------------------------------------------------- #
 def write_audit(con: duckdb.DuckDBPyConnection, target: str, row: dict) -> None:
     validate_table(target)
-    db, schema, _table = target.split(".")
-    con.execute(f'CREATE DATABASE IF NOT EXISTS "{db}"')
-    con.execute(f'CREATE SCHEMA IF NOT EXISTS "{db}"."{schema}"')
+    db, schema, table = target.split(".")
+    qualified = f"{quote_ident(db)}.{quote_ident(schema)}.{quote_ident(table)}"
+    con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(db)}")
+    con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(db)}.{quote_ident(schema)}")
     con.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {target} (
+        CREATE TABLE IF NOT EXISTS {qualified} (
             run_id VARCHAR, run_at TIMESTAMPTZ, list_id VARCHAR, query_sha256 VARCHAR,
             n_emails BIGINT, n_resolved BIGINT, n_unmatched BIGINT,
             n_current_before BIGINT, n_added BIGINT, n_removed BIGINT,
@@ -235,7 +243,7 @@ def write_audit(con: duckdb.DuckDBPyConnection, target: str, row: dict) -> None:
         """
     )
     con.execute(
-        f"INSERT INTO {target} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        f"INSERT INTO {qualified} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             row["run_id"], row["run_at"], row["list_id"], row["query_sha256"],
             row["n_emails"], row["n_resolved"], row["n_unmatched"],
