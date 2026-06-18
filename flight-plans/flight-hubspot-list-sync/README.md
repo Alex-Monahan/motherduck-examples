@@ -1,13 +1,13 @@
 ---
-title: Sync a HubSpot List From a MotherDuck Query With a Flight
+title: Update a HubSpot List From a MotherDuck Query With a Flight
 id: flight-hubspot-list-sync
 description: >-
-  A reusable Flight that reconciles a HubSpot static contact list to the result
-  of a parameterized MotherDuck query: resolves emails to contact IDs, diffs
-  against the list's current members, and applies the minimal add/remove via the
+  An example of data activation / reverse ETL with Flights.
+  Run a MotherDuck SQL Query to pull a list of emails and update a Hubspot list.
+  That Hubspot list can then be used for automatic customer or marketing activities.
+  This flight resolves emails to Hubspot contact IDs and applies the minimal add/remove via the
   Lists v3 API. Idempotent re-runs, retries with backoff, skip-and-log for
-  unmatched emails, and an audit ledger. Use it to keep a HubSpot audience in
-  sync with a SQL query on a schedule.
+  unmatched emails, and an audit ledger.
 type: template
 category: integrations
 features: [flights]
@@ -16,7 +16,8 @@ tags: [hubspot]
 
 # Sync a HubSpot List From a MotherDuck Query With a Flight
 
-A single-file Flight that drives the membership of a HubSpot **static** contact
+Flights allow you to take action in your business based on MotherDuck data.
+This flight updates the membership of a HubSpot contact
 list from a MotherDuck query. The query returns email addresses; the Flight
 makes the list match that set on every run.
 
@@ -53,12 +54,10 @@ contact are skipped and logged so one bad address never fails the run.
 - Which MotherDuck `QUERY` defines the audience, and does it output an `email`
   column (or set `EMAIL_COLUMN`)?
 - Which **static** HubSpot list receives the membership? Create a dedicated
-  `MANUAL` list so a bad run can't disturb an important one, and use its list ID.
+  `MANUAL` list and use its list ID.
 - Which HubSpot credential and scopes? A Service Key or private app token with
   `crm.lists.read`, `crm.lists.write`, `crm.objects.contacts.read`,
   `crm.objects.contacts.write`.
-- Should unmatched emails stay skipped-and-logged (the default), or do you need
-  missing contacts created first (a code change)?
 - What schedule (cron, UTC) matches how often the underlying data changes?
 
 ## Caveats
@@ -104,7 +103,7 @@ runtime; for a local run you can instead export `HUBSPOT_PRIVATE_APP_TOKEN`.
 ## Run it
 
 You need a MotherDuck account and token, plus a HubSpot token and an existing
-static list. For a safe first pass, use `DRY_RUN=true` to see the diff without
+Hubspot static list. For a safe first pass, use `DRY_RUN=true` to see the diff without
 touching the list.
 
 ```bash
@@ -145,10 +144,6 @@ CREATE SECRET hubspot IN motherduck (
 );
 ```
 
-(`getenv()` is only available in the duckdb CLI; it is not defined in
-MotherDuck's server-side execution, so the UI/Python paths need the literal
-value.)
-
 Then create the Flight with the `MD_CREATE_FLIGHT` SQL function (no deploy SQL is
 checked in; adapt the arguments), passing:
 
@@ -175,9 +170,7 @@ schedule with the user before adding one.
 - **Keep the literal token out of history.** Prefer the duckdb-CLI `getenv()`
   form above (or the Settings UI) so the raw token is not typed into SQL text or
   shell history.
-- **Dedicated static list.** Point the Flight at a purpose-built `MANUAL` list so
-  a misconfigured run cannot disturb a list other systems depend on. The Flight
-  also refuses non-static lists outright.
+- **Dedicated static list.** Point the Flight at a purpose-built `MANUAL` list.
 - **Validated audit target.** `AUDIT_TABLE` is checked as plain SQL identifiers
   before it is interpolated into `CREATE`/`INSERT` (not parameterizable).
 - **Least privilege.** Scope the Service Key / private app token to exactly the
