@@ -12,6 +12,14 @@ type: template
 category: integrations
 features: [flights]
 tags: [hubspot]
+prompt: >-
+  I want a Flight that runs a MotherDuck SQL query to produce a list of emails and
+  reconciles a HubSpot static contact list to match it (data activation / reverse
+  ETL) — resolving emails to contact IDs, applying the minimal add/remove, with
+  retries and an audit log. Help me adapt the "Update a HubSpot List From a
+  MotherDuck Query With a Flight" recipe to my own data and use case, using it as a
+  guide: https://motherduck.com/docs/cookbook/flight-hubspot-list-sync
+published_date: 2026-06-17
 ---
 
 # Sync a HubSpot List From a MotherDuck Query With a Flight
