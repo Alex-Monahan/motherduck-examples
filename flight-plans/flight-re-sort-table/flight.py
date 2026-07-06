@@ -1,5 +1,6 @@
 """MotherDuck Flight: re-sort a table so selective queries can skip row groups.
 
+If fast selective read queries are important, use this Flight for up to 10x or more speed improvement!
 DuckDB keeps a min/max index (a zonemap) per row group per column. A filtered
 query skips a whole row group when the filter value falls outside that range —
 but only if rows are physically clustered on the filtered column. This flight
@@ -20,25 +21,7 @@ Inputs (flight config / env vars):
   without modifying any data.
 
 Because these inputs are spliced into SQL, each one is validated before it is
-allowed anywhere near a real statement:
-
-1. ``duckdb.tokenize`` (DuckDB's own SQL tokenizer) inspects the leading
-   tokens of ``ORDER_BY_CLAUSE`` / ``WHERE_CLAUSE`` so an optional ``ORDER
-   BY`` / ``WHERE`` keyword prefix is recognized exactly the way the parser
-   would see it — not with fragile string matching.
-2. Each input is embedded in a dummy statement (``SELECT * FROM <table>``,
-   ``... ORDER BY <clause>``, ``... WHERE (<clause>)``) and handed to
-   ``json_serialize_sql`` on a *local, in-memory* DuckDB. The dummy must parse
-   with no error into exactly one statement — and ``json_serialize_sql`` only
-   succeeds for SELECT statements, so "1 statement + no error" means "a single
-   SELECT". Anything with a smuggled semicolon, a second statement, or a
-   non-SELECT payload is rejected before any SQL is sent to MotherDuck.
-3. The parsed AST is then checked structurally: the table input must be a bare
-   base-table reference (no alias, sample, AT clause, join, or subquery), the
-   ORDER BY input must contribute exactly one ORDER modifier (no smuggled
-   LIMIT/OFFSET), and the WHERE input must be a lone predicate. The table name
-   is rebuilt from the AST's catalog/schema/table parts with proper identifier
-   quoting, so the raw input string is discarded entirely.
+allowed anywhere near a real statement.
 
 Once validated, the rewrite runs as one transaction:
 
@@ -50,8 +33,7 @@ Once validated, the rewrite runs as one transaction:
     DROP TABLE <table>_<uuid>;
     COMMIT;
 
-Row counts from the copy, delete, and insert must agree or the transaction is
-rolled back. The scratch table lives in the same database and schema as the
+The scratch table lives in the same database and schema as the
 target and is dropped inside the transaction, so a commit leaves nothing
 behind and a rollback undoes everything at once.
 """

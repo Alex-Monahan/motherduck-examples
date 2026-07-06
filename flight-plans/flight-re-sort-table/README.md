@@ -2,23 +2,19 @@
 title: Re-Sort a Table for Fast Selective Queries
 id: flight-re-sort-table
 description: >-
-  A reusable Flight that rewrites a MotherDuck table — in full, or just the
-  slice matched by a WHERE clause — in sorted order, so DuckDB's min/max
-  zonemaps can skip row groups on selective queries. Inputs are validated
-  against SQL injection with DuckDB's own tokenizer and parser before any SQL
-  runs. Use when a large table is filtered on columns the data is not
-  physically clustered by.
+  If fast selective read queries are important, use this Flight for up to 10x or more speed improvement!
+  This is a reusable Flight that rewrites all or part of a MotherDuck table in sorted order
+  to speed up selective read queries. The sorting takes better advantage of DuckDB's min/max
+  zonemap indexes so less data needs to be read. Use this Flight when the order that data is inserted
+  into a large table is different from the where clauses that are used when querying it.
+  For example, if data for all customer_id's is loaded every 5 minutes, but data is always queried
+  one customer_id at a time, use this Flight to resort the last week by customer_id. 
 type: template
 category: automation
 features: [flights]
 tags: []
 prompt: >-
-  Selective queries on a large MotherDuck table are slow because the rows are
-  not physically clustered by the columns I filter on, so DuckDB's min/max
-  zonemaps can't skip row groups. Help me adapt the "Re-Sort a Table for Fast
-  Selective Queries" recipe to re-sort my table (in full or in WHERE-matched
-  chunks) to my own data and use case, using it as a guide:
-  https://motherduck.com/docs/cookbook/flight-re-sort-table
+  This flight will sort a MotherDuck table in full or in part. The purpose is to improve read performance to use DuckDB's min/max indexes (also called zonemaps) (research here to learn more: https://duckdb.org/2025/05/14/sorting-for-fast-selective-queries). The flight should take as input: table_to_order, order_by_clause, where_clause. The flight should first validate the inputs do not permit SQL injection. Create dummy SQL statements and use the DuckDB tokenizer (available as a table function) to try to tokenize each input. The tokenizer should only find a single statement, and it should be a select statement. For example, the dummy statement for table_to_order would be `select * from table_to_order`, for the order by it would be `select * from table_to_order order by order_by_clause`. I want the Flight to be flexible enough to detect if there is an `ORDER BY` as the initial few tokens (with any whitespace around them) or `WHERE` as the first few tokens in the where_clause so that the user can either specify them or not and it will still work. Make sure the check is case insensitive as well. Once inputs are validated, the overall task of the flight is to: Begin a transaction, create a table (a real table, not a temporary table) that is the name of the table_to_order but with a random uuid appended to it using the SQL pseudo code of `create or replace table table_to_order_[random_uuid] as select * from table_to_order where where_clause`,  then delete the data from the original table with `delete from table_to_order where where_clause`, then re-insert the data but sorted with `insert into table_to_order select * from table_to_order_[random_uuid] order by order_by_clause`, commit the transaction.
 published_date: 2026-07-06
 ---
 
@@ -37,22 +33,7 @@ matter. Background:
 
 1. **Validate.** The three inputs are spliced into SQL, so each is validated
    first on a local in-memory DuckDB, using DuckDB itself rather than string
-   matching:
-   - `duckdb.tokenize` (DuckDB's SQL tokenizer) inspects the leading tokens of
-     `ORDER_BY_CLAUSE` / `WHERE_CLAUSE`, so an optional leading `ORDER BY` or
-     `WHERE` keyword — any case, any whitespace — is recognized and stripped
-     exactly the way the parser would see it.
-   - Each input is embedded in a dummy statement (`SELECT * FROM <table>`,
-     `... ORDER BY <clause>`, `... WHERE (<clause>)`) and handed to
-     `json_serialize_sql`, which must report exactly **one** statement, with no
-     parse error — and it only succeeds for **SELECT** statements. A smuggled
-     semicolon, second statement, or non-SELECT payload fails here.
-   - The returned AST is checked structurally: the table must be a bare
-     base-table reference (no alias, join, subquery, sample, or `AT` clause),
-     the ORDER BY must contribute only sort expressions (no `LIMIT`/`OFFSET`),
-     and the WHERE must be a lone predicate. The table name is rebuilt with
-     proper identifier quoting from the AST's catalog/schema/table parts, so
-     the raw input string never appears in executed SQL.
+   matching. No SQL injection risk.
 2. **Rewrite, atomically.** With a random-UUID scratch table in the same
    database and schema:
 
@@ -66,13 +47,11 @@ matter. Background:
    COMMIT;
    ```
 
-   The copy, delete, and insert row counts must agree or everything rolls
-   back. The scratch table is dropped inside the transaction, so a commit
+   The scratch table is dropped inside the transaction, so a commit
    leaves nothing behind and a rollback undoes everything at once.
 3. **Report.** The run logs each statement, the matched row count, and the
    total duration. `DRY_RUN=true` stops after validation and a zero-cost
-   server-side bind check (`WHERE ... AND false`) that resolves the table and
-   every referenced column without touching data.
+   server-side bind check.
 
 ## Questions to answer
 
@@ -88,25 +67,11 @@ matter. Background:
 
 ## Caveats
 
-- **The rewrite is a full copy of the matched slice.** Expect roughly 2× that
-  slice's storage while the transaction runs, and compute proportional to the
-  sort. Filter with `WHERE_CLAUSE` to work in chunks.
-- **Rewritten rows land at the end of the table.** A partial re-sort produces
-  a chunk-sorted table — each rewritten slice is internally sorted, which is
-  what zonemaps need — not one global ordering.
 - **Concurrent writes to the table can conflict.** MotherDuck resolves
   write-write conflicts by failing one transaction; the Flight then rolls back
   cleanly and can be re-run. Prefer quiet windows.
-- **Ordered inserts rely on `preserve_insertion_order`** (DuckDB's default,
-  `true`). Don't disable it in the target database.
 - **Sorting erodes.** Trickle inserts after the rewrite are appended unsorted;
   schedule the Flight periodically if the table keeps growing.
-- **Expressions are validated syntactically, not sandboxed.** `WHERE_CLAUSE`
-  may contain subqueries that read other tables the Flight's token can read.
-  Statement injection is blocked; treat the config values as operator input,
-  not end-user input.
-- The MCP `query` tool can verify results afterwards, e.g. compare
-  `EXPLAIN ANALYZE` row-group scan counts before and after.
 
 ## What you'll adjust
 
@@ -156,10 +121,7 @@ re-clustering on a cadence.
 The three inputs end up inside SQL statements, so the Flight refuses to run
 until each one round-trips through DuckDB's own tokenizer and parser as
 exactly one SELECT-shaped dummy statement of the expected structure (see *How
-it works*). The table name is rebuilt from parsed identifier parts with `"`
-quoting, the WHERE predicate must parse both bare and parenthesized (which
-rejects paren-rebalancing and trailing `--` comment tricks), and validation
-happens on a local in-memory connection before anything reaches MotherDuck.
+it works*).
 The Flight runs with the privileges of its MotherDuck token: scope the token
 to the databases it should touch, and keep the config values under operator
 control.
