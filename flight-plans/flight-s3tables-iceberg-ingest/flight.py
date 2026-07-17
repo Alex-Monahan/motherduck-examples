@@ -15,14 +15,14 @@ That statement is the entire load. It is:
 Tables land at <target>.<namespace>.<table>, preserving source namespace names. Per-table
 logging lands in <target>.main.flight_tracker.
 
-Credentials -- the flight uses NO AWS credentials
+Credentials 
 -------------------------------------------------
 It references a persistent MotherDuck S3 secret by name (SECRET_NAME below), created once out
 of band. The keys need S3 Tables catalog access (s3tables:*) in the bucket's account, plus read
 on the data:
 
     CREATE SECRET s3_tables_secret IN MOTHERDUCK (
-        TYPE S3, KEY_ID '...', SECRET '...', SESSION_TOKEN '...', REGION 'us-east-1'
+        TYPE S3, KEY_ID '...', SECRET '...', REGION 'us-east-1'
     );
 
 Config (non-secret env vars)
