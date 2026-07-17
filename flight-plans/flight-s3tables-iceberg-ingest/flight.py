@@ -63,8 +63,8 @@ ARN_RE = re.compile(r"arn:aws:s3tables:[a-z0-9-]+:\d+:bucket/[A-Za-z0-9][A-Za-z0
 DEFAULT_ARN = "arn:aws:s3tables:us-east-1:114325331884:bucket/clickbench-iceberg"
 SAMPLE_NAMESPACE = "clickbench"  # namespace in the default sample bucket
 
-# DuckDB catalog schemas that are never copied, should they surface via discovery.
-SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "main"}
+# Postgres catalog schemas that are never copied, should they surface via discovery.
+SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast"}
 
 # Persistent MotherDuck S3 secret the catalog attach references. Change it to point at another
 # secret (it must be a TYPE S3 secret created IN MOTHERDUCK).
@@ -144,10 +144,6 @@ def pick_attach_namespace(
 # --------------------------------------------------------------------------- #
 # Connection + setup
 # --------------------------------------------------------------------------- #
-def connect_motherduck() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect("md:")
-
-
 def attach_iceberg(con: duckdb.DuckDBPyConnection, arn: str, attach_namespace: str) -> None:
     """Attach the S3 Tables bucket as a MotherDuck database of TYPE ICEBERG, using the
     persistent S3 secret. CREATE OR REPLACE makes it idempotent. Raises with a clear hint if
@@ -249,7 +245,7 @@ def main() -> None:
 
     log.info("Run %s -> target %r", RUN_ID, TARGET_DB)
 
-    con = connect_motherduck()
+    con = duckdb.connect("md:")
     attach_iceberg(con, ARN, pick_attach_namespace(INCLUDED_SCHEMAS, INCLUDED_TABLES))
     ensure_target(con, TARGET_DB)
 
