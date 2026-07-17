@@ -60,6 +60,7 @@ log = logging.getLogger("s3tables-iceberg-ingest")
 
 # arn:aws:s3tables:<region>:<account-id>:bucket/<bucket-name>
 ARN_RE = re.compile(r"arn:aws:s3tables:[a-z0-9-]+:\d+:bucket/[A-Za-z0-9][A-Za-z0-9_-]*")
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 DEFAULT_ARN = "arn:aws:s3tables:us-east-1:114325331884:bucket/clickbench-iceberg"
 SAMPLE_NAMESPACE = "clickbench"  # namespace in the default sample bucket
 
@@ -88,6 +89,20 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def qualified_name(*parts: str) -> str:
+    """Join parts into a fully-qualified SQL name with every part quoted, so identifiers from
+    config or catalog discovery cannot break out of their quotes (SQL-injection safe)."""
+    return ".".join(quote_ident(part) for part in parts)
+
+
+def validate_identifier(name: str, value: str) -> str:
+    """Reject a config value that is not a plain SQL identifier before it is used as one
+    (defense in depth alongside quote_ident)."""
+    if not IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"{name} must be a simple SQL identifier, got {value!r}")
+    return value
+
+
 def csv_set(name: str) -> frozenset[str]:
     """Turn a comma-separated env var into a clean set for membership filtering. Returns a set
     of trimmed, non-empty values (empty set if unset)."""
@@ -114,7 +129,7 @@ def is_selected(
 ) -> bool:
     """Decide whether a discovered table is copied, applying the two include/exclude gates
     where exclude always wins and system schemas are excluded."""
-    fqtn = f"{schema}.{table}"
+    fqtn = f"{schema}.{table}"  # include/exclude membership only; never interpolated into SQL
     if schema in SYSTEM_SCHEMAS:
         return False
     if included_schemas and schema not in included_schemas:
@@ -172,10 +187,9 @@ def attach_iceberg(con: duckdb.DuckDBPyConnection, arn: str, attach_namespace: s
 
 def ensure_target(con: duckdb.DuckDBPyConnection, target_db: str) -> None:
     """Create the target database and the audit logging table up front."""
-    target = quote_ident(target_db)
-    con.execute(f"CREATE DATABASE IF NOT EXISTS {target}")
+    con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
     con.execute(
-        f"CREATE TABLE IF NOT EXISTS {target}.main.flight_tracker ("
+        f"CREATE TABLE IF NOT EXISTS {qualified_name(target_db, 'main', 'flight_tracker')} ("
         "  run_id               VARCHAR,"
         "  flight_secret_name   VARCHAR,"
         "  source_schema        VARCHAR,"
@@ -208,8 +222,8 @@ def discover_tables(con: duckdb.DuckDBPyConnection) -> list[tuple[str, str]]:
 def load_table(con: duckdb.DuckDBPyConnection, target_db: str, schema: str, table: str) -> int:
     """Move one table as a single atomic, idempotent, streaming CTAS. Returns the row count
     the CTAS reports as inserted."""
-    tgt = f"{quote_ident(target_db)}.{quote_ident(schema)}.{quote_ident(table)}"
-    src = f"{quote_ident(ICEBERG_ALIAS)}.{quote_ident(schema)}.{quote_ident(table)}"
+    tgt = qualified_name(target_db, schema, table)
+    src = qualified_name(ICEBERG_ALIAS, schema, table)
     return con.execute(f"CREATE OR REPLACE TABLE {tgt} AS SELECT * FROM {src}").fetchone()[0]
 
 
@@ -220,7 +234,7 @@ def record_success(
 ) -> None:
     """After success, append a row to the audit table."""
     con.execute(
-        f"INSERT INTO {quote_ident(target_db)}.main.flight_tracker "
+        f"INSERT INTO {qualified_name(target_db, 'main', 'flight_tracker')} "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [run_id, SECRET_NAME, schema, table, target_db, schema, table,
          rows_loaded, attempts, started_at, finished_at, update_ts],
@@ -235,7 +249,10 @@ def main() -> None:
     sequentially with per-table retries/isolation and record results."""
     RUN_ID = str(uuid.uuid4())
     ARN = validate_arn(os.environ.get("TABLE_BUCKET_ARN", DEFAULT_ARN).strip())
-    TARGET_DB = os.environ.get("TARGET_DATABASE", "iceberg_ingest").strip() or "iceberg_ingest"
+    TARGET_DB = validate_identifier(
+        "TARGET_DATABASE",
+        os.environ.get("TARGET_DATABASE", "iceberg_ingest").strip() or "iceberg_ingest",
+    )
     MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
     RETRY_BASE_SECONDS = float(os.environ.get("RETRY_BASE_SECONDS", "2"))
     INCLUDED_SCHEMAS = csv_set("INCLUDED_SCHEMAS")
@@ -262,7 +279,7 @@ def main() -> None:
 
     # Pre-create the target schemas (mirroring source namespace names) once.
     for sch in sorted({s for (s, _) in selected}):
-        con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(TARGET_DB)}.{quote_ident(sch)}")
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name(TARGET_DB, sch)}")
 
     started_all = datetime.now(timezone.utc)
     failed: list[str] = []
@@ -270,7 +287,7 @@ def main() -> None:
     rows_total = 0
 
     for schema, table in selected:
-        fqtn = f"{schema}.{table}"
+        fqtn = f"{schema}.{table}"  # logging only; SQL names go through qualified_name()
         started = datetime.now(timezone.utc)
         retryer = Retrying(
             stop=stop_after_attempt(MAX_RETRIES),
