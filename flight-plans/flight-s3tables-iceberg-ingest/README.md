@@ -1,27 +1,35 @@
 ---
-title: Copy an AWS S3 Tables Iceberg Table into MotherDuck
+title: Copy AWS S3 Tables (Iceberg) into MotherDuck With a Flight
 id: flight-s3tables-iceberg-ingest
 description: >-
-  A reusable Flight that copies a table from an AWS S3 Tables (Iceberg) catalog
-  into a native MotherDuck table with one CREATE OR REPLACE TABLE AS SELECT. Use
-  it for a config-driven, re-runnable S3 Tables to MotherDuck ingest.
+  A reusable Flight that copies tables from an AWS S3 Tables (Iceberg) catalog
+  into MotherDuck, one streaming full-refresh CREATE OR REPLACE per table, with
+  config-driven namespace/table selection, retries with backoff, and a per-table
+  audit log. Use it for a config-driven, re-runnable S3 Tables to MotherDuck ingest.
 type: template
 category: ingestion
 features: [flights]
 tags: [ingest, s3]
 ---
 
-# Copy an AWS S3 Tables Iceberg Table into MotherDuck
+# Copy AWS S3 Tables (Iceberg) into MotherDuck With a Flight
 
-Copies a table from an AWS S3 Tables Iceberg warehouse into a native MotherDuck table, so queries
-read a local table instead of scanning Iceberg on every run. Point it at any S3 Tables table, set
-how many rows to copy, and re-run it on a schedule to keep the copy current. Everything is driven by
-config, so you can reuse it without editing the code.
+Copies one or more tables from an AWS S3 Tables Iceberg warehouse into a MotherDuck database, so
+queries read native tables instead of scanning Iceberg on every run. Point it at a bucket, pick
+which namespaces and tables to copy, and re-run it on a schedule to keep the copies current.
+Everything is driven by config, so you can reuse it without editing the code.
+
+Each run attaches the S3 Tables catalog as a MotherDuck database (`TYPE ICEBERG`), discovers the
+tables in scope, and moves each with one statement:
+`CREATE OR REPLACE TABLE <target>."<namespace>"."<table>" AS SELECT * FROM <catalog>."<namespace>"."<table>"`.
+That is the whole load: atomic (swaps in one step), idempotent (a re-run replaces), and streaming
+(flat memory even on large tables). Tables land at `<target>.<namespace>.<table>`, preserving
+source namespace names, with a per-table log in `<target>.main.flight_tracker`.
 
 ## Prerequisite: an S3 secret
 
-The Flight holds no AWS keys of its own. It looks up a MotherDuck S3 secret by name
-(`MD_SECRET_NAME`, default `s3_tables_secret`), so create that secret once. The keys need S3 Tables
+The Flight holds no AWS keys. It references a MotherDuck S3 secret by name (`SECRET_NAME` in
+`flight.py`, default `s3_tables_secret`), so create that secret once. The keys need S3 Tables
 catalog access (`s3tables:*`) in the bucket's account, plus read on the data. Run this through the
 DuckDB CLI so `getenv()` reads the keys from your shell instead of writing them into the statement
 (drop `SESSION_TOKEN` for long-lived IAM keys):
@@ -42,47 +50,59 @@ Temporary keys expire, so re-create the secret when they lapse or use long-lived
 
 ## What you'll adjust
 
-Set these as Flight config, not by editing code.
+No code edits are required. Everything is read from Flight config and the MotherDuck secret.
 
-| Config key | Default | Purpose |
+| Knob | Default | Purpose |
 |---|---|---|
-| `TABLE_BUCKET_ARN` | ClickBench sample bucket ARN | S3 Tables bucket ARN. |
-| `SOURCE_NAMESPACE` | `clickbench` | Iceberg namespace in the bucket. |
-| `SOURCE_TABLE` | `hits` | Table to copy. |
-| `MD_SECRET_NAME` | `s3_tables_secret` | The MotherDuck S3 secret to use. |
-| `ICEBERG_DATABASE` | `iceberg_src` | Name for the attached catalog database. |
-| `DESTINATION_DATABASE` | `from_iceberg` | Target database. Created if missing. |
-| `DESTINATION_SCHEMA` | `main` | Target schema. Created if missing. |
-| `DESTINATION_TABLE` | (= `SOURCE_TABLE`) | Target table name. |
-| `ROW_LIMIT` | `100000` | Rows to copy. `0` copies the whole table. |
-| `AUDIT_TABLE` | `<dest_db>.<dest_schema>.flight_tracker` | Per-run log. Empty to skip. |
+| `TABLE_BUCKET_ARN` | ClickBench sample bucket ARN | S3 Tables bucket to copy from (`arn:aws:s3tables:…:bucket/…`). |
+| `TARGET_DATABASE` | `iceberg_ingest` | MotherDuck database for the copy (created if absent). Tables land at `<target>.<namespace>.<table>`. |
+| `INCLUDED_SCHEMAS` | (all) | Comma-separated namespaces to include. Empty = all. |
+| `EXCLUDED_SCHEMAS` | (none) | Comma-separated namespaces to drop. Exclude wins. |
+| `INCLUDED_TABLES` | (all) | Comma-separated `namespace.table` to include. Empty = all in selected namespaces. |
+| `EXCLUDED_TABLES` | (none) | Comma-separated `namespace.table` to drop. Exclude wins. |
+| `MAX_RETRIES` | `5` | Per-table retry attempts on transient errors. |
+| `RETRY_BASE_SECONDS` | `2` | Exponential-backoff multiplier (seconds). |
+| `s3_tables_secret` **secret** | (required) | MotherDuck `TYPE S3` secret with the AWS keys. Rename it only if you also change `SECRET_NAME` in `flight.py`. |
+
+Selection precedence: a table is copied only if its namespace passes the namespace gate and its
+`namespace.table` passes the table gate; excludes always win.
+
+To open the catalog, the attach needs one namespace that exists in the bucket. It comes from
+`INCLUDED_SCHEMAS`, else the namespaces named in `INCLUDED_TABLES`, else the sample namespace. Set
+`INCLUDED_SCHEMAS` (or `INCLUDED_TABLES`) when pointing at a non-sample bucket.
 
 ## Run it
 
-With the secret in place, the Flight needs only a MotherDuck token.
+With the secret in place, the Flight needs only a MotherDuck token; it reads no AWS env vars.
 
 ```bash
 export MOTHERDUCK_TOKEN=your_token_here
-ROW_LIMIT=1000 uv run --with duckdb==1.5.4 --no-project flight.py
+# scope it so a first run is cheap (the sample `hits` table is ~100M rows):
+export INCLUDED_TABLES=clickbench.probe,clickbench.ptest
+uv run --with-requirements requirements.txt flight.py
 ```
 
-This copies 1,000 rows into `from_iceberg.main.hits`. Change any default inline, for example
-`ROW_LIMIT=0` for the whole table.
+This copies the selected tables into `iceberg_ingest`, one full-refresh `CREATE OR REPLACE` each,
+and writes one `flight_tracker` row per table. One log line per table plus a summary; it exits
+non-zero if any table failed after retries.
 
 ### Deploy as a Flight
 
 Create it with `MD_CREATE_FLIGHT`, passing `name`, `source_code` ([`flight.py`](flight.py)),
-`requirements_txt` ([`requirements.txt`](requirements.txt)), and any `config` overrides. No secret
+`requirements_txt` ([`requirements.txt`](requirements.txt)), and a `config` with at least
+`TABLE_BUCKET_ARN` plus any `INCLUDED_*`/`EXCLUDED_*` scoping and `TARGET_DATABASE`. No secret
 arguments are needed: the Flight reads a stored `IN MOTHERDUCK` secret, and a MotherDuck token is
-attached for you. Run it once with `MD_RUN_FLIGHT`, then add a schedule with `MD_UPDATE_FLIGHT`. Use
-long-lived IAM keys for scheduled runs.
+attached for you. Run it once with `MD_RUN_FLIGHT`, confirm `flight_tracker` has one row per table,
+then add a schedule with `MD_UPDATE_FLIGHT`. Use long-lived IAM keys for scheduled runs.
 
 ## Caveats
 
-- If the secret's keys lack S3 Tables catalog access in the bucket's account, the run fails right
-  away with a clear message.
-- `ROW_LIMIT=0` reads the whole table (the sample `hits` is about 100M rows), so keep a limit for tests.
-- Needs `duckdb==1.5.4` (pinned in `requirements.txt`).
+- **Full refresh per table.** Cost scales with table size, not change volume. The sample `hits`
+  table is about 100M rows, so scope runs with `INCLUDED_TABLES`/`INCLUDED_SCHEMAS`.
+- **Dropped source tables are not removed** from the target; delete them yourself.
+- **Credentials are the usual failure.** Without S3 Tables catalog access in the bucket's account,
+  the attach fails right away with a clear message.
+- Needs the MotherDuck client in `duckdb==1.5.4` (pinned in `requirements.txt`).
 
 ## Learn more
 

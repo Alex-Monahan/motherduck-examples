@@ -1,51 +1,42 @@
 """
-AWS S3 Tables (Iceberg) -> MotherDuck native storage flight.
+AWS S3 Tables (Iceberg) -> MotherDuck batch copy flight.
 
-Copies a table from an AWS S3 Tables Iceberg warehouse into MotherDuck native storage by
-attaching the S3 Tables catalog as a first-class MotherDuck database and reading THROUGH it:
+Copies one or more tables from an AWS S3 Tables Iceberg catalog into a MotherDuck database.
+Each table is moved by a single streaming SQL statement:
 
-    CREATE OR REPLACE DATABASE <ice_db> (
-        TYPE ICEBERG,
-        WAREHOUSE '<s3tables-bucket-arn>',
-        ENDPOINT_TYPE 's3_tables',   -- derives the REST endpoint + SigV4 auth from the ARN
-        "secret" <secret>,           -- a pre-existing MotherDuck S3 secret (see below)
-        default_schema '<namespace>' -- the Iceberg namespace; REQUIRED
-    );
-    CREATE OR REPLACE TABLE <dest_db>."<schema>"."<table>" AS
-        SELECT * FROM <ice_db>."<namespace>"."<table>" [LIMIT <n>];
+    CREATE OR REPLACE TABLE <target>."<namespace>"."<table>" AS
+        SELECT * FROM <catalog>."<namespace>"."<table>";
 
-`CREATE OR REPLACE` on both statements makes the load atomic and idempotent (a re-run refreshes
-the catalog attach and fully replaces the destination). The default config copies the first 100k
-rows of the public ClickBench `hits` table into a `from_iceberg` database.
+That statement is the entire load. It is:
+    ATOMIC (CREATE OR REPLACE swaps in one step)
+    IDEMPOTENT (re-running fully replaces)
+    STREAMING (DuckDB pipelines the scan into the write, bounded memory)
+
+Tables land at <target>.<namespace>.<table>, preserving source namespace names. Per-table
+logging lands in <target>.main.flight_tracker.
 
 Credentials -- the flight uses NO AWS credentials
 -------------------------------------------------
-This flight assumes a **persistent MotherDuck S3 secret already exists** and simply references it
-by name (MD_SECRET_NAME). Create it once before the flight runs (see the README):
+It references a persistent MotherDuck S3 secret by name (SECRET_NAME below), created once out
+of band. The keys need S3 Tables catalog access (s3tables:*) in the bucket's account, plus read
+on the data:
 
     CREATE SECRET s3_tables_secret IN MOTHERDUCK (
         TYPE S3, KEY_ID '...', SECRET '...', SESSION_TOKEN '...', REGION 'us-east-1'
     );
 
-The secret's credentials must reach the S3 Tables catalog (s3tables:* actions) in the bucket's
-AWS account, plus the underlying data. Temporary (session-token) credentials expire with the
-token -- re-create the secret before a run when they lapse.
-
 Config (non-secret env vars)
 ----------------------------
-  TABLE_BUCKET_ARN      S3 Tables bucket ARN (arn:aws:s3tables:<region>:<acct>:bucket/<name>).
-  SOURCE_NAMESPACE      Iceberg namespace in the bucket (default 'clickbench').
-  SOURCE_TABLE          Iceberg table to copy (default 'hits').
-  MD_SECRET_NAME        Name of the pre-existing MotherDuck S3 secret (default 's3_tables_secret').
-  ICEBERG_DATABASE      Name for the attached Iceberg catalog database (default 'iceberg_src').
-  DESTINATION_DATABASE  MotherDuck database to create/write (default 'from_iceberg').
-  DESTINATION_SCHEMA    Destination schema (default 'main').
-  DESTINATION_TABLE     Destination table (default '' -> same as SOURCE_TABLE).
-  ROW_LIMIT             Rows to copy (default '100000'; '0' or '' = entire table).
-  AUDIT_TABLE           Audit ledger 'db.schema.table' (default '<dest_db>.<dest_schema>.flight_tracker'; '' to skip).
+    TABLE_BUCKET_ARN   S3 Tables bucket ARN (arn:aws:s3tables:<region>:<acct>:bucket/<name>).
+    TARGET_DATABASE    MotherDuck database to write into (default: iceberg_ingest).
+    INCLUDED_SCHEMAS / EXCLUDED_SCHEMAS   comma-separated Iceberg namespaces.
+    INCLUDED_TABLES  / EXCLUDED_TABLES    comma-separated, fully qualified namespace.table.
+    MAX_RETRIES (5)
+    RETRY_BASE_SECONDS (2)
 
-Requires the MotherDuck client extension that supports server-side Iceberg attach (duckdb 1.5.4);
-a 1.5.3 client can run count(*) through the attach but cannot project columns from it.
+To open the catalog, the attach needs one namespace that exists in the bucket. It is taken from
+INCLUDED_SCHEMAS, else the namespaces named in INCLUDED_TABLES, else the sample namespace. Set
+INCLUDED_SCHEMAS (or INCLUDED_TABLES) when pointing at a non-sample bucket.
 """
 
 from __future__ import annotations
@@ -55,8 +46,10 @@ import os
 import re
 import sys
 import uuid
+from datetime import datetime, timezone
 
 import duckdb
+from tenacity import Retrying, stop_after_attempt, wait_exponential, wait_random
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,26 +58,41 @@ logging.basicConfig(
 )
 log = logging.getLogger("s3tables-iceberg-ingest")
 
-IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # arn:aws:s3tables:<region>:<account-id>:bucket/<bucket-name>
 ARN_RE = re.compile(r"arn:aws:s3tables:[a-z0-9-]+:\d+:bucket/[A-Za-z0-9][A-Za-z0-9_-]*")
-
 DEFAULT_ARN = "arn:aws:s3tables:us-east-1:114325331884:bucket/clickbench-iceberg"
+SAMPLE_NAMESPACE = "clickbench"  # namespace in the default sample bucket
+
+# DuckDB catalog schemas that are never copied, should they surface via discovery.
+SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "main"}
+
+# Persistent MotherDuck S3 secret the catalog attach references. Change it to point at another
+# secret (it must be a TYPE S3 secret created IN MOTHERDUCK).
+SECRET_NAME = "s3_tables_secret"
+
+# Local catalog name the S3 Tables bucket is attached as (TYPE ICEBERG). One source of truth.
+ICEBERG_ALIAS = "iceberg_src"
 
 
 # --------------------------------------------------------------------------- #
-# Small helpers
+# Small SQL / env helpers
 # --------------------------------------------------------------------------- #
-def env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
+def quote_ident(ident: str) -> str:
+    """Double-quote a SQL identifier, escaping embedded quotes, so names with special
+    characters or reserved words are handled correctly and safely."""
+    return '"' + ident.replace('"', '""') + '"'
 
 
-def validate_identifier(name: str, value: str) -> str:
-    """Reject anything that is not a plain SQL identifier before it reaches SQL that cannot be
-    parameterized (database / schema / table / secret names)."""
-    if not IDENTIFIER_RE.fullmatch(value):
-        raise ValueError(f"{name} must be a simple SQL identifier, got {value!r}")
-    return value
+def quote_literal(value: str) -> str:
+    """Single-quote a string literal, escaping embedded single quotes."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def csv_set(name: str) -> frozenset[str]:
+    """Turn a comma-separated env var into a clean set for membership filtering. Returns a set
+    of trimmed, non-empty values (empty set if unset)."""
+    raw = os.environ.get(name, "") or ""
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 def validate_arn(value: str) -> str:
@@ -93,15 +101,44 @@ def validate_arn(value: str) -> str:
     return value
 
 
-def quote_ident(ident: str) -> str:
-    """Double-quote a SQL identifier, escaping embedded quotes (defense in depth alongside
-    validate_identifier)."""
-    return '"' + ident.replace('"', '""') + '"'
+# --------------------------------------------------------------------------- #
+# Table selection
+# --------------------------------------------------------------------------- #
+def is_selected(
+    schema: str,
+    table: str,
+    included_schemas: frozenset[str],
+    excluded_schemas: frozenset[str],
+    included_tables: frozenset[str],
+    excluded_tables: frozenset[str],
+) -> bool:
+    """Decide whether a discovered table is copied, applying the two include/exclude gates
+    where exclude always wins and system schemas are excluded."""
+    fqtn = f"{schema}.{table}"
+    if schema in SYSTEM_SCHEMAS:
+        return False
+    if included_schemas and schema not in included_schemas:
+        return False
+    if schema in excluded_schemas:
+        return False
+    if included_tables and fqtn not in included_tables:
+        return False
+    if fqtn in excluded_tables:
+        return False
+    return True
 
 
-def quote_literal(value: str) -> str:
-    """Single-quote a string literal, escaping embedded single quotes."""
-    return "'" + value.replace("'", "''") + "'"
+def pick_attach_namespace(
+    included_schemas: frozenset[str], included_tables: frozenset[str]
+) -> str:
+    """Choose one namespace to open the catalog with (Iceberg requires a default_schema that
+    exists). Prefer INCLUDED_SCHEMAS, then the namespaces in INCLUDED_TABLES, then the sample."""
+    if included_schemas:
+        return sorted(included_schemas)[0]
+    namespaces = sorted({fq.split(".", 1)[0] for fq in included_tables if "." in fq})
+    if namespaces:
+        return namespaces[0]
+    return SAMPLE_NAMESPACE
 
 
 # --------------------------------------------------------------------------- #
@@ -111,128 +148,160 @@ def connect_motherduck() -> duckdb.DuckDBPyConnection:
     return duckdb.connect("md:")
 
 
-def attach_iceberg_catalog(
-    con: duckdb.DuckDBPyConnection,
-    ice_db: str,
-    arn: str,
-    namespace: str,
-    secret_name: str,
-) -> None:
-    """Attach the S3 Tables catalog as a MotherDuck database of TYPE ICEBERG, using a pre-existing
-    MotherDuck S3 secret. CREATE OR REPLACE makes this idempotent and refreshes the attach (and
-    thus any rotated secret) on every run. Raises with a clear hint if the attach comes up as an
-    error catalog -- almost always a missing/underprivileged secret."""
+def attach_iceberg(con: duckdb.DuckDBPyConnection, arn: str, attach_namespace: str) -> None:
+    """Attach the S3 Tables bucket as a MotherDuck database of TYPE ICEBERG, using the
+    persistent S3 secret. CREATE OR REPLACE makes it idempotent. Raises with a clear hint if
+    the attach comes up as an error catalog (usually a missing/underprivileged secret or a
+    default_schema namespace that does not exist)."""
     con.execute(
-        f"CREATE OR REPLACE DATABASE {quote_ident(ice_db)} ("
+        f"CREATE OR REPLACE DATABASE {quote_ident(ICEBERG_ALIAS)} ("
         f"TYPE ICEBERG, "
         f"WAREHOUSE {quote_literal(arn)}, "
         f"ENDPOINT_TYPE 's3_tables', "
-        f'"secret" {quote_ident(secret_name)}, '
-        f"default_schema {quote_literal(namespace)})"
+        f'"secret" {quote_ident(SECRET_NAME)}, '
+        f"default_schema {quote_literal(attach_namespace)})"
     )
     is_error, message = con.execute(
         "SELECT is_error_catalog, error_message FROM MD_ATTACHED_DATABASES() WHERE alias = ?",
-        [ice_db],
+        [ICEBERG_ALIAS],
     ).fetchone()
     if is_error:
         raise RuntimeError(
-            f"Iceberg catalog '{ice_db}' attached as an ERROR catalog: {message}\n"
-            f"Ensure the MotherDuck secret '{secret_name}' exists and its AWS credentials have "
-            f"S3 Tables catalog (s3tables:*) permissions in the bucket's account. Create it with "
-            f"CREATE SECRET {secret_name} IN MOTHERDUCK (TYPE S3, ...); see the README."
+            f"Iceberg catalog attached as an ERROR catalog: {message}\n"
+            f"Check that secret {SECRET_NAME!r} exists with S3 Tables catalog (s3tables:*) "
+            f"permissions in the bucket's account, and that namespace {attach_namespace!r} exists."
         )
-    log.info("Attached S3 Tables catalog as %s (TYPE ICEBERG) via secret %s", ice_db, secret_name)
+    log.info("Attached %s as %s (TYPE ICEBERG) via secret %s", arn, ICEBERG_ALIAS, SECRET_NAME)
 
 
-def ensure_audit_table(con: duckdb.DuckDBPyConnection, audit: str) -> None:
-    db, schema, _ = audit.split(".")
-    con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(db)}.{quote_ident(schema)}")
+def ensure_target(con: duckdb.DuckDBPyConnection, target_db: str) -> None:
+    """Create the target database and the audit logging table up front."""
+    target = quote_ident(target_db)
+    con.execute(f"CREATE DATABASE IF NOT EXISTS {target}")
     con.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {audit_fqtn(audit)} (
-            run_id            VARCHAR,
-            run_at            TIMESTAMPTZ,
-            table_bucket_arn  VARCHAR,
-            source_namespace  VARCHAR,
-            source_table      VARCHAR,
-            iceberg_source    VARCHAR,
-            destination_table VARCHAR,
-            row_limit         BIGINT,
-            rows_loaded       BIGINT
-        )
-        """
+        f"CREATE TABLE IF NOT EXISTS {target}.main.flight_tracker ("
+        "  run_id               VARCHAR,"
+        "  flight_secret_name   VARCHAR,"
+        "  source_schema        VARCHAR,"
+        "  source_table         VARCHAR,"
+        "  destination_database VARCHAR,"
+        "  destination_schema   VARCHAR,"
+        "  destination_table    VARCHAR,"
+        "  rows_loaded          BIGINT,"
+        "  attempts             INTEGER,"
+        "  started_at           TIMESTAMP,"
+        "  finished_at          TIMESTAMP,"
+        "  update_ts            TIMESTAMP"
+        ")"
     )
 
 
-def audit_fqtn(audit: str) -> str:
-    return ".".join(quote_ident(p) for p in audit.split("."))
+# --------------------------------------------------------------------------- #
+# Discovery + per-table load
+# --------------------------------------------------------------------------- #
+def discover_tables(con: duckdb.DuckDBPyConnection) -> list[tuple[str, str]]:
+    """List the candidate source tables across every namespace in the attached catalog."""
+    rows = con.execute(
+        "SELECT schema_name, table_name FROM duckdb_tables() "
+        "WHERE database_name = ? ORDER BY schema_name, table_name",
+        [ICEBERG_ALIAS],
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def load_table(con: duckdb.DuckDBPyConnection, target_db: str, schema: str, table: str) -> int:
+    """Move one table as a single atomic, idempotent, streaming CTAS. Returns the row count
+    the CTAS reports as inserted."""
+    tgt = f"{quote_ident(target_db)}.{quote_ident(schema)}.{quote_ident(table)}"
+    src = f"{quote_ident(ICEBERG_ALIAS)}.{quote_ident(schema)}.{quote_ident(table)}"
+    return con.execute(f"CREATE OR REPLACE TABLE {tgt} AS SELECT * FROM {src}").fetchone()[0]
+
+
+def record_success(
+    con: duckdb.DuckDBPyConnection, target_db: str, run_id: str,
+    schema: str, table: str, rows_loaded: int, attempts: int,
+    started_at: datetime, finished_at: datetime, update_ts: datetime,
+) -> None:
+    """After success, append a row to the audit table."""
+    con.execute(
+        f"INSERT INTO {quote_ident(target_db)}.main.flight_tracker "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [run_id, SECRET_NAME, schema, table, target_db, schema, table,
+         rows_loaded, attempts, started_at, finished_at, update_ts],
+    )
 
 
 # --------------------------------------------------------------------------- #
-# Main
+# main
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    arn = validate_arn(env("TABLE_BUCKET_ARN", DEFAULT_ARN))
-    namespace = validate_identifier("SOURCE_NAMESPACE", env("SOURCE_NAMESPACE", "clickbench"))
-    source_table = validate_identifier("SOURCE_TABLE", env("SOURCE_TABLE", "hits"))
+    """Orchestrate the copy: connect, attach, discover, then load each selected table
+    sequentially with per-table retries/isolation and record results."""
+    RUN_ID = str(uuid.uuid4())
+    ARN = validate_arn(os.environ.get("TABLE_BUCKET_ARN", DEFAULT_ARN).strip())
+    TARGET_DB = os.environ.get("TARGET_DATABASE", "iceberg_ingest").strip() or "iceberg_ingest"
+    MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
+    RETRY_BASE_SECONDS = float(os.environ.get("RETRY_BASE_SECONDS", "2"))
+    INCLUDED_SCHEMAS = csv_set("INCLUDED_SCHEMAS")
+    EXCLUDED_SCHEMAS = csv_set("EXCLUDED_SCHEMAS")
+    INCLUDED_TABLES = csv_set("INCLUDED_TABLES")
+    EXCLUDED_TABLES = csv_set("EXCLUDED_TABLES")
 
-    secret_name = validate_identifier("MD_SECRET_NAME", env("MD_SECRET_NAME", "s3_tables_secret"))
-    ice_db = validate_identifier("ICEBERG_DATABASE", env("ICEBERG_DATABASE", "iceberg_src"))
-
-    dest_db = validate_identifier("DESTINATION_DATABASE", env("DESTINATION_DATABASE", "from_iceberg"))
-    dest_schema = validate_identifier("DESTINATION_SCHEMA", env("DESTINATION_SCHEMA", "main"))
-    dest_table = validate_identifier(
-        "DESTINATION_TABLE", env("DESTINATION_TABLE", "") or source_table
-    )
-    destination = f"{quote_ident(dest_db)}.{quote_ident(dest_schema)}.{quote_ident(dest_table)}"
-
-    raw_limit = env("ROW_LIMIT", "100000")
-    row_limit = int(raw_limit) if raw_limit else 0
-    if row_limit < 0:
-        raise ValueError(f"ROW_LIMIT must be >= 0, got {row_limit}")
-
-    audit = env("AUDIT_TABLE", f"{dest_db}.{dest_schema}.flight_tracker")
+    log.info("Run %s -> target %r", RUN_ID, TARGET_DB)
 
     con = connect_motherduck()
+    attach_iceberg(con, ARN, pick_attach_namespace(INCLUDED_SCHEMAS, INCLUDED_TABLES))
+    ensure_target(con, TARGET_DB)
 
-    # Attach the S3 Tables catalog as a TYPE ICEBERG database, then read the source table THROUGH
-    # the catalog (no iceberg_scan, no metadata pointers, no AWS credentials in this flight).
-    attach_iceberg_catalog(con, ice_db, arn, namespace, secret_name)
-    iceberg_source = (
-        f"{quote_ident(ice_db)}.{quote_ident(namespace)}.{quote_ident(source_table)}"
-    )
+    all_tables = discover_tables(con)
+    selected = [
+        (s, t) for (s, t) in all_tables
+        if is_selected(s, t, INCLUDED_SCHEMAS, EXCLUDED_SCHEMAS, INCLUDED_TABLES, EXCLUDED_TABLES)
+    ]
+    log.info("Discovered %d table(s); %d selected after filters", len(all_tables), len(selected))
 
-    con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(dest_db)}")
-    con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(dest_db)}.{quote_ident(dest_schema)}")
+    if not selected:
+        log.warning("No tables selected - nothing to do.")
+        return
 
-    limit_clause = f" LIMIT {row_limit}" if row_limit > 0 else ""
-    log.info("Copying %s -> %s%s", iceberg_source, destination,
-             f" (first {row_limit} rows)" if row_limit > 0 else " (entire table)")
-    con.execute(
-        f"CREATE OR REPLACE TABLE {destination} AS "
-        f"SELECT * FROM {iceberg_source}{limit_clause}"
-    )
+    # Pre-create the target schemas (mirroring source namespace names) once.
+    for sch in sorted({s for (s, _) in selected}):
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(TARGET_DB)}.{quote_ident(sch)}")
 
-    rows_loaded = con.execute(f"SELECT count(*) FROM {destination}").fetchone()[0]
-    log.info("Loaded %s rows into %s", rows_loaded, destination)
+    started_all = datetime.now(timezone.utc)
+    failed: list[str] = []
+    succeeded = 0
+    rows_total = 0
 
-    if audit:
-        ensure_audit_table(con, audit)
-        con.execute(
-            f"INSERT INTO {audit_fqtn(audit)} VALUES (?, current_timestamp, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                str(uuid.uuid4()),
-                arn,
-                namespace,
-                source_table,
-                f"{ice_db}.{namespace}.{source_table}",
-                f"{dest_db}.{dest_schema}.{dest_table}",
-                row_limit,
-                rows_loaded,
-            ],
+    for schema, table in selected:
+        fqtn = f"{schema}.{table}"
+        started = datetime.now(timezone.utc)
+        retryer = Retrying(
+            stop=stop_after_attempt(MAX_RETRIES),
+            wait=wait_exponential(multiplier=RETRY_BASE_SECONDS, max=60) + wait_random(0, 1),
+            reraise=True,
         )
+        try:
+            rows = retryer(load_table, con, TARGET_DB, schema, table)
+            attempts = retryer.statistics.get("attempt_number", 1)
+            finished = datetime.now(timezone.utc)
+            record_success(con, TARGET_DB, RUN_ID, schema, table, rows,
+                           attempts, started, finished, datetime.now(timezone.utc))
+            succeeded += 1
+            rows_total += rows
+            log.info("OK   %-50s %12d rows (attempts=%d)", fqtn, rows, attempts)
+        except Exception as exc:  # noqa: BLE001 - per-table isolation is intentional
+            attempts = retryer.statistics.get("attempt_number", 1)
+            failed.append(fqtn)
+            log.error("FAIL %-50s (attempts=%d) %s: %s", fqtn, attempts, type(exc).__name__, exc)
 
-    print(f"copied {namespace}.{source_table} -> {dest_db}.{dest_schema}.{dest_table}: {rows_loaded} rows")
+    total_seconds = (datetime.now(timezone.utc) - started_all).total_seconds()
+    log.info("Summary: %d succeeded, %d failed, %d rows in %.1fs (run %s)",
+             succeeded, len(failed), rows_total, total_seconds, RUN_ID)
+
+    if failed:
+        log.error("Failed tables: %s", ", ".join(failed))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
