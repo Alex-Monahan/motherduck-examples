@@ -30,9 +30,13 @@ Config (non-secret env vars)
     TABLE_BUCKET_ARN   S3 Tables bucket ARN (arn:aws:s3tables:<region>:<acct>:bucket/<name>).
     TARGET_DATABASE    MotherDuck database to write into (default: iceberg_ingest).
     INCLUDED_SCHEMAS / EXCLUDED_SCHEMAS   comma-separated Iceberg namespaces.
-    INCLUDED_TABLES  / EXCLUDED_TABLES    comma-separated, fully qualified namespace.table.
+    INCLUDED_TABLES  / EXCLUDED_TABLES    comma-separated table specs: `namespace.table` or a
+                                          bare `table` (matches that table in any namespace).
     MAX_RETRIES (5)
     RETRY_BASE_SECONDS (2)
+
+Selection is case-insensitive and format tolerant: each namespace/table entry may be given with
+or without double quotes ("clickbench"."hits" == clickbench.hits) and with surrounding whitespace.
 
 To open the catalog, the attach needs one namespace that exists in the bucket. It is taken from
 INCLUDED_SCHEMAS, else the namespaces named in INCLUDED_TABLES, else the sample namespace. Set
@@ -103,11 +107,61 @@ def validate_identifier(name: str, value: str) -> str:
     return value
 
 
-def csv_set(name: str) -> frozenset[str]:
-    """Turn a comma-separated env var into a clean set for membership filtering. Returns a set
-    of trimmed, non-empty values (empty set if unset)."""
-    raw = os.environ.get(name, "") or ""
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+def _unquote(part: str) -> str:
+    """Strip one layer of surrounding double quotes from an identifier and unescape "" -> "."""
+    part = part.strip()
+    if len(part) >= 2 and part[0] == '"' and part[-1] == '"':
+        return part[1:-1].replace('""', '"')
+    return part
+
+
+def _split_outside_quotes(text: str, sep: str) -> list[str]:
+    """Split text on sep, ignoring separators that fall inside double quotes."""
+    parts, buf, in_quotes = [], [], False
+    for ch in text:
+        if ch == '"':
+            in_quotes = not in_quotes
+            buf.append(ch)
+        elif ch == sep and not in_quotes:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _split_ref(text: str) -> list[str]:
+    """Parse a dotted identifier reference into its unquoted parts, honoring double quotes (a
+    '.' inside quotes is literal). Empty parts (stray dots/whitespace) are dropped."""
+    return [u for p in _split_outside_quotes(text, ".") if (u := _unquote(p))]
+
+
+def csv_schemas(name: str) -> frozenset[str]:
+    """Parse a comma-separated namespace list into a set of unquoted names, tolerant of optional
+    double quotes and whitespace. Case is preserved here; matching casefolds (see is_selected)."""
+    out = set()
+    for entry in _split_outside_quotes(os.environ.get(name, "") or "", ","):
+        parts = _split_ref(entry)
+        if parts:
+            out.add(".".join(parts))
+    return frozenset(out)
+
+
+def csv_tables(name: str) -> frozenset[tuple[str | None, str]]:
+    """Parse a comma-separated table list into a set of (namespace|None, table) specs. Accepts a
+    fully-qualified `namespace.table` or a bare `table`, each part optionally double-quoted, with
+    surrounding whitespace. Case is preserved here; matching casefolds (see is_selected)."""
+    out = set()
+    for entry in _split_outside_quotes(os.environ.get(name, "") or "", ","):
+        parts = _split_ref(entry)
+        if not parts:
+            continue
+        if len(parts) == 1:
+            out.add((None, parts[0]))
+        else:
+            out.add((".".join(parts[:-1]), parts[-1]))
+    return frozenset(out)
 
 
 def validate_arn(value: str) -> str:
@@ -124,35 +178,50 @@ def is_selected(
     table: str,
     included_schemas: frozenset[str],
     excluded_schemas: frozenset[str],
-    included_tables: frozenset[str],
-    excluded_tables: frozenset[str],
+    included_tables: frozenset[tuple[str | None, str]],
+    excluded_tables: frozenset[tuple[str | None, str]],
 ) -> bool:
-    """Decide whether a discovered table is copied, applying the two include/exclude gates
-    where exclude always wins and system schemas are excluded."""
-    fqtn = f"{schema}.{table}"  # include/exclude membership only; never interpolated into SQL
-    if schema in SYSTEM_SCHEMAS:
+    """Decide whether a discovered table is copied. Matching is case-insensitive and format
+    tolerant: schema specs are plain names and table specs are (namespace|None, table), already
+    unquoted by csv_schemas/csv_tables. A bare-table spec matches that table in any namespace.
+    Exclude always wins; system schemas are always dropped."""
+    s = schema.casefold()
+    t = table.casefold()
+    inc_s = {x.casefold() for x in included_schemas}
+    exc_s = {x.casefold() for x in excluded_schemas}
+
+    if s in SYSTEM_SCHEMAS:
         return False
-    if included_schemas and schema not in included_schemas:
+    if inc_s and s not in inc_s:
         return False
-    if schema in excluded_schemas:
+    if s in exc_s:
         return False
-    if included_tables and fqtn not in included_tables:
+
+    def matches(specs: frozenset[tuple[str | None, str]]) -> bool:
+        for spec_schema, spec_table in specs:
+            if spec_table.casefold() == t and (spec_schema is None or spec_schema.casefold() == s):
+                return True
         return False
-    if fqtn in excluded_tables:
+
+    if included_tables and not matches(included_tables):
+        return False
+    if matches(excluded_tables):
         return False
     return True
 
 
-def pick_attach_namespace(
-    included_schemas: frozenset[str], included_tables: frozenset[str]
-) -> str:
+def pick_attach_namespace() -> str:
     """Choose one namespace to open the catalog with (Iceberg requires a default_schema that
-    exists). Prefer INCLUDED_SCHEMAS, then the namespaces in INCLUDED_TABLES, then the sample."""
-    if included_schemas:
-        return sorted(included_schemas)[0]
-    namespaces = sorted({fq.split(".", 1)[0] for fq in included_tables if "." in fq})
-    if namespaces:
-        return namespaces[0]
+    exists). Prefer INCLUDED_SCHEMAS, then the namespaces named in INCLUDED_TABLES, then the
+    sample. Uses the name as typed (quotes stripped), preserving case for the catalog."""
+    for entry in _split_outside_quotes(os.environ.get("INCLUDED_SCHEMAS", "") or "", ","):
+        parts = _split_ref(entry)
+        if parts:
+            return ".".join(parts)
+    for entry in _split_outside_quotes(os.environ.get("INCLUDED_TABLES", "") or "", ","):
+        parts = _split_ref(entry)
+        if len(parts) >= 2:
+            return ".".join(parts[:-1])
     return SAMPLE_NAMESPACE
 
 
@@ -255,15 +324,15 @@ def main() -> None:
     )
     MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
     RETRY_BASE_SECONDS = float(os.environ.get("RETRY_BASE_SECONDS", "2"))
-    INCLUDED_SCHEMAS = csv_set("INCLUDED_SCHEMAS")
-    EXCLUDED_SCHEMAS = csv_set("EXCLUDED_SCHEMAS")
-    INCLUDED_TABLES = csv_set("INCLUDED_TABLES")
-    EXCLUDED_TABLES = csv_set("EXCLUDED_TABLES")
+    INCLUDED_SCHEMAS = csv_schemas("INCLUDED_SCHEMAS")
+    EXCLUDED_SCHEMAS = csv_schemas("EXCLUDED_SCHEMAS")
+    INCLUDED_TABLES = csv_tables("INCLUDED_TABLES")
+    EXCLUDED_TABLES = csv_tables("EXCLUDED_TABLES")
 
     log.info("Run %s -> target %r", RUN_ID, TARGET_DB)
 
     con = duckdb.connect("md:")
-    attach_iceberg(con, ARN, pick_attach_namespace(INCLUDED_SCHEMAS, INCLUDED_TABLES))
+    attach_iceberg(con, ARN, pick_attach_namespace())
     ensure_target(con, TARGET_DB)
 
     all_tables = discover_tables(con)

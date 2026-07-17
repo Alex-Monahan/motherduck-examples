@@ -54,14 +54,18 @@ No code edits are required. Everything is read from Flight config and the Mother
 | `TARGET_DATABASE` | `iceberg_ingest` | MotherDuck database for the copy (created if absent). Tables land at `<target>.<namespace>.<table>`. |
 | `INCLUDED_SCHEMAS` | (all) | Comma-separated namespaces to include. Empty = all. |
 | `EXCLUDED_SCHEMAS` | (none) | Comma-separated namespaces to drop. Exclude wins. |
-| `INCLUDED_TABLES` | (all) | Comma-separated `namespace.table` to include. Empty = all in selected namespaces. |
-| `EXCLUDED_TABLES` | (none) | Comma-separated `namespace.table` to drop. Exclude wins. |
+| `INCLUDED_TABLES` | (all) | Comma-separated `namespace.table`, or a bare `table` (matches that table in any namespace). Empty = all in selected namespaces. |
+| `EXCLUDED_TABLES` | (none) | Comma-separated `namespace.table` or bare `table` to drop. Exclude wins. |
 | `MAX_RETRIES` | `5` | Per-table retry attempts on transient errors. |
 | `RETRY_BASE_SECONDS` | `2` | Exponential-backoff multiplier (seconds). |
 | `s3_tables_secret` **secret** | (required) | MotherDuck `TYPE S3` secret with the AWS keys. Rename it only if you also change `SECRET_NAME` in `flight.py`. |
 
 Selection precedence: a table is copied only if its namespace passes the namespace gate and its
 `namespace.table` passes the table gate; excludes always win.
+
+Selection is forgiving about formats. Entries can be quoted or unquoted (`"clickbench"."hits"` is
+the same as `clickbench.hits`), fully qualified or a bare table name, and have surrounding
+whitespace. Matching is case-insensitive.
 
 To open the catalog, the attach needs one namespace that exists in the bucket. It comes from
 `INCLUDED_SCHEMAS`, else the namespaces named in `INCLUDED_TABLES`, else the sample namespace. Set
