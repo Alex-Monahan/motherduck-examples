@@ -19,12 +19,11 @@ queries read native tables instead of scanning Iceberg on every run. Point it at
 which namespaces and tables to copy, and re-run it on a schedule to keep the copies current.
 Everything is driven by config, so you can reuse it without editing the code.
 
-Each run attaches the S3 Tables catalog as a MotherDuck database (`TYPE ICEBERG`), discovers the
-tables in scope, and moves each with one statement:
-`CREATE OR REPLACE TABLE <target>."<namespace>"."<table>" AS SELECT * FROM <catalog>."<namespace>"."<table>"`.
-That is the whole load: atomic (swaps in one step), idempotent (a re-run replaces), and streaming
-(flat memory even on large tables). Tables land at `<target>.<namespace>.<table>`, preserving
-source namespace names, with a per-table log in `<target>.main.flight_tracker`.
+Each run attaches the S3 Tables catalog as a MotherDuck database (`TYPE ICEBERG`), finds the tables
+in scope, and copies each one with a single `CREATE OR REPLACE TABLE ... AS SELECT *`. That
+statement is the whole load: it swaps the table in one step, a re-run just replaces it, and DuckDB
+streams the read straight into the write so memory stays flat on large tables. Copied tables land at
+`<target>.<namespace>.<table>`, and each run writes one row per table to `<target>.main.flight_tracker`.
 
 ## Prerequisite: an S3 secret
 
@@ -97,11 +96,11 @@ then add a schedule with `MD_UPDATE_FLIGHT`. Use long-lived IAM keys for schedul
 
 ## Caveats
 
-- **Full refresh per table.** Cost scales with table size, not change volume. The sample `hits`
-  table is about 100M rows, so scope runs with `INCLUDED_TABLES`/`INCLUDED_SCHEMAS`.
-- **Dropped source tables are not removed** from the target; delete them yourself.
-- **Credentials are the usual failure.** Without S3 Tables catalog access in the bucket's account,
-  the attach fails right away with a clear message.
+- Every run copies each selected table in full, so cost tracks table size, not how much changed.
+  The sample `hits` table is about 100M rows, so scope runs with `INCLUDED_TABLES` or `INCLUDED_SCHEMAS`.
+- A table dropped at the source is not dropped from the target; remove it yourself.
+- If the secret's keys can't reach the S3 Tables catalog in the bucket's account, the attach fails
+  right away with a clear message.
 - Needs the MotherDuck client in `duckdb==1.5.4` (pinned in `requirements.txt`).
 
 ## Learn more
