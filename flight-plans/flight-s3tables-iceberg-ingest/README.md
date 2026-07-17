@@ -2,7 +2,7 @@
 title: Copy AWS S3 Tables (Iceberg) into MotherDuck With a Flight
 id: flight-s3tables-iceberg-ingest
 description: >-
-  A reusable Flight that copies tables from an AWS S3 Tables (Iceberg) catalog
+  A reusable Flight that copies tables from an Apache Iceberg (AWS S3 Tables) catalog
   into MotherDuck, one streaming full-refresh CREATE OR REPLACE per table, with
   config-driven namespace/table selection, retries with backoff, and a per-table
   audit log. Use it for a config-driven, re-runnable S3 Tables to MotherDuck ingest.
@@ -12,16 +12,16 @@ features: [flights]
 tags: [ingest, s3]
 ---
 
-# Copy AWS S3 Tables (Iceberg) into MotherDuck With a Flight
+# Copy Apache Iceberg (AWS S3 Tables) into MotherDuck With a Flight
 
-Copies one or more tables from an AWS S3 Tables Iceberg warehouse into a MotherDuck database, so
-queries read native tables instead of scanning Iceberg on every run. Point it at a bucket, pick
+Copies one or more tables from an AWS S3 Tables Iceberg Lakehouse into a MotherDuck database, so
+queries read native tables instead of scanning Iceberg. Point it at a bucket, pick
 which namespaces and tables to copy, and re-run it on a schedule to keep the copies current.
 Everything is driven by config, so you can reuse it without editing the code.
 
 Each run attaches the S3 Tables catalog as a MotherDuck database (`TYPE ICEBERG`), finds the tables
-in scope, and copies each one with a single `CREATE OR REPLACE TABLE ... AS SELECT *`. That
-statement is the whole load: it swaps the table in one step, a re-run just replaces it, and DuckDB
+in scope, and copies each one with a single `CREATE OR REPLACE TABLE ... AS SELECT *`. 
+It swaps the table in one step, a re-run just replaces it, and DuckDB
 streams the read straight into the write so memory stays flat on large tables. Copied tables land at
 `<target>.<namespace>.<table>`, and each run writes one row per table to `<target>.main.flight_tracker`.
 
@@ -39,13 +39,10 @@ CREATE OR REPLACE SECRET s3_tables_secret IN MOTHERDUCK (
     TYPE S3,
     KEY_ID getenv('AWS_ACCESS_KEY_ID'),
     SECRET getenv('AWS_SECRET_ACCESS_KEY'),
-    SESSION_TOKEN getenv('AWS_SESSION_TOKEN'),
     REGION 'us-east-1'
 );
 SQL
 ```
-
-Temporary keys expire, so re-create the secret when they lapse or use long-lived IAM keys.
 
 ## What you'll adjust
 
@@ -53,7 +50,7 @@ No code edits are required. Everything is read from Flight config and the Mother
 
 | Knob | Default | Purpose |
 |---|---|---|
-| `TABLE_BUCKET_ARN` | ClickBench sample bucket ARN | S3 Tables bucket to copy from (`arn:aws:s3tables:…:bucket/…`). |
+| `TABLE_BUCKET_ARN` | AWS Bucket ARN | S3 Tables bucket to copy from (`arn:aws:s3tables:…:bucket/…`). |
 | `TARGET_DATABASE` | `iceberg_ingest` | MotherDuck database for the copy (created if absent). Tables land at `<target>.<namespace>.<table>`. |
 | `INCLUDED_SCHEMAS` | (all) | Comma-separated namespaces to include. Empty = all. |
 | `EXCLUDED_SCHEMAS` | (none) | Comma-separated namespaces to drop. Exclude wins. |
@@ -70,7 +67,7 @@ To open the catalog, the attach needs one namespace that exists in the bucket. I
 `INCLUDED_SCHEMAS`, else the namespaces named in `INCLUDED_TABLES`, else the sample namespace. Set
 `INCLUDED_SCHEMAS` (or `INCLUDED_TABLES`) when pointing at a non-sample bucket.
 
-## Run it
+## Run it Locally
 
 With the secret in place, the Flight needs only a MotherDuck token; it reads no AWS env vars.
 
@@ -99,9 +96,6 @@ then add a schedule with `MD_UPDATE_FLIGHT`. Use long-lived IAM keys for schedul
 - Every run copies each selected table in full, so cost tracks table size, not how much changed.
   The sample `hits` table is about 100M rows, so scope runs with `INCLUDED_TABLES` or `INCLUDED_SCHEMAS`.
 - A table dropped at the source is not dropped from the target; remove it yourself.
-- If the secret's keys can't reach the S3 Tables catalog in the bucket's account, the attach fails
-  right away with a clear message.
-- Needs the MotherDuck client in `duckdb==1.5.4` (pinned in `requirements.txt`).
 
 ## Learn more
 
