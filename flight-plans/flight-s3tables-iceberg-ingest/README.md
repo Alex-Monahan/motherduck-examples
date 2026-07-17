@@ -10,6 +10,14 @@ type: template
 category: ingestion
 features: [flights]
 tags: [ingest, s3]
+prompt: >-
+  I have tables in an AWS S3 Tables Iceberg bucket and I want to copy them into
+  MotherDuck as native tables, on a schedule, so my queries stop re-scanning Iceberg
+  every time. I need to choose which namespaces and tables get copied, and I want a
+  re-run to just replace the data. Help me adapt the "Copy AWS S3 Tables (Iceberg)
+  into MotherDuck With a Flight" recipe to my own bucket and use case, using it as a
+  starting point.
+published_date: 2026-07-17
 ---
 
 # Copy Apache Iceberg (AWS S3 Tables) into MotherDuck With a Flight
