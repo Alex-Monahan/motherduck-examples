@@ -27,16 +27,15 @@ with no redeploy.
 
 ## How it works
 
-1. The notebook API is regional, so the Flight connects to MotherDuck first
-   and reads the organization's region with
-   `SELECT region FROM md_user_info();`. The API host is
-   `https://api.<region>-aws.motherduck.com`.
+1. The notebook API is regional. The Flight reads the cloud and region from
+   the `mdRegion` claim of `MOTHERDUCK_TOKEN` (for example `aws-us-east-1`)
+   and calls `https://api.<region>-<cloud>.motherduck.com`.
 2. `NOTEBOOK` is a notebook UUID or title. Anything that parses as a UUID is
    treated as one. Otherwise it is resolved as a title through
    `GET /mom/notebooks`, and it must match exactly one notebook.
 3. `GET /mom/notebooks/<uuid>` returns the notebook. Its `json` field is a
    string holding `{"cells": [{"cellId", "query", "useDatabase", ...}]}`.
-4. That same `duckdb.connect("md:")` connection runs every cell in order. Before each
+4. One `duckdb.connect("md:")` connection runs every cell in order. Before each
    cell it runs `USE "<useDatabase>"`, the database selected for that cell in
    the UI. A cell with no selected database skips the `USE` and keeps the
    previous cell's database. State carries over between cells on that
@@ -62,8 +61,8 @@ The UUID is the last part of the notebook URL in the MotherDuck UI.
   Flight fails loudly at fetch time rather than running the wrong SQL.
 - **Region-specific host.** The notebook API only answers on the regional host
   (for example `api.us-east-1-aws.motherduck.com`);
-  `api.motherduck.com/mom/notebooks` returns 404. The region comes from
-  `md_user_info()`, which needs a DuckDB 1.5.3 or later client.
+  `api.motherduck.com/mom/notebooks` returns 404. The host is built from the
+  token's `mdRegion` claim, which is also undocumented.
 - **Only the token owner's notebooks.** The endpoint lists notebooks owned by
   the user the Flight's token belongs to, so run the Flight as that user.
 - **Every cell runs, and results are discarded.** Nothing is printed except the
@@ -114,7 +113,7 @@ different notebook, change `config`; the code stays the same.
 ## Security
 
 - The token is sent as a bearer header only to the regional
-  `https://api.<region>-aws.motherduck.com` host.
+  `https://api.<region>-<cloud>.motherduck.com` host.
 - Each cell's SQL is written to the Flight logs. Keep secrets and sensitive
   literals out of the notebook; use `CREATE SECRET` once outside it, not in a
   scheduled cell.
