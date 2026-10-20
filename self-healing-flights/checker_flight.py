@@ -75,10 +75,22 @@ def classify(text):
     return label
 
 
+def from_logs(run):
+    # No event row (e.g. the run failed before heal existed): read the HEAL_EVENT line or the last error from the run's log.
+    lines = [r[1] for r in sorted(con.execute('SELECT line_number, line FROM MD_GET_FLIGHT_LOGS(flight_id := ?::UUID, run_number := ?, "limit" := 200)',
+                                              [str(run["flight_id"]), run["run_number"]]).fetchall())]
+    for line in reversed(lines):
+        if "HEAL_EVENT " in line:
+            ev = json.loads(line.split("HEAL_EVENT ", 1)[1])
+            return ev.get("error_type", "RunFailed"), ev.get("message", line)
+    errors = [l for l in lines if re.search(r"(Error|Exception)\b", l)]
+    return "RunFailed", (errors[-1] if errors else (lines[-1] if lines else f"run {run['run_number']} failed with no output"))
+
+
 def on_failure(pipeline, run):
     row = con.execute("""SELECT error_type, message FROM heal.main.pipeline_events WHERE flight_id = ?::UUID AND run_number = ?
                          ORDER BY ts DESC LIMIT 1""", [run["flight_id"], run["run_number"]]).fetchone()
-    etype, msg = row if row else ("RunFailed", f"run {run['run_number']} failed without a HEAL_EVENT")
+    etype, msg = row if row else from_logs(run)
     norm = normalize(msg)
     fp = hashlib.sha1(f"{pipeline}|{etype}|{norm}".encode()).hexdigest()[:16]
     hit = con.execute("""SELECT incident_id FROM heal.main.incidents WHERE fingerprint = ? AND status <> 'resolved'""", [fp]).fetchone()

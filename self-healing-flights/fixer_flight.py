@@ -22,7 +22,6 @@ BUDGET = float(os.environ.get("BUDGET_USD", "10"))
 ROUNDS = int(os.environ.get("APPROVER_ROUNDS", "2"))
 OPENCODE = "1.19.3"
 KEY = os.environ["openrouter_OPENROUTER_API_KEY"]
-PIPELINE_FLIGHTS = {"weather": "heal-demo-weather", "hourly": "heal-demo-hourly"}
 HOW_USED = ("reused_fix", "same_root_cause", "pointed_to_location", "ruled_out_hypothesis")
 HOOK = 'HEADERS["Feature-Flags"] = os.environ["NWS_FEATURE_FLAGS"]'  # the fault simulation must survive any fix
 WORK = "/tmp/fix"
@@ -172,7 +171,8 @@ def validate_links(claimed, read):
 INC_ROW = dict(zip(["title", "pipeline", "level"], db("SELECT title, pipeline, level FROM heal.main.incidents WHERE incident_id = ?", [INC])[0]))
 db("""INSERT OR REPLACE INTO heal.main.fixer_runs (fixer_run_id, incident_id, attempt, started_at, status, level, model, approver_model, cost_usd, approver_rounds)
                VALUES (?, ?, ?, now(), 'running', ?, ?, ?, 0, 0)""", [RUN_ID, INC, ATTEMPT, INC_ROW["level"], MODEL, APPROVER])
-fid = str(db("SELECT flight_id FROM MD_LIST_FLIGHTS(owner_only := true) WHERE flight_name = ?", [PIPELINE_FLIGHTS[INC_ROW["pipeline"]]])[0][0])
+flight_name = db("SELECT flight_name FROM heal.main.pipeline_registry WHERE name = ?", [INC_ROW["pipeline"]])[0][0]  # the checker owns the pipeline list
+fid = str(db("SELECT flight_id FROM MD_LIST_FLIGHTS(owner_only := true) WHERE flight_name = ?", [flight_name])[0][0])
 version = db("SELECT current_version FROM MD_GET_FLIGHT(flight_id := ?::UUID)", [fid])[0][0]
 SOURCE, CONFIG = db("SELECT source_code, config FROM MD_GET_FLIGHT_VERSION(flight_id := ?::UUID, version_number := ?)", [fid, version])[0]
 CONFIG = {k: str(v) for k, v in (CONFIG or {}).items()}

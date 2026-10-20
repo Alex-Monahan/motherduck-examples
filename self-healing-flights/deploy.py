@@ -1,6 +1,6 @@
 """Create or update the schema, the four Flights and the Dive (all resolved by name, so it is safe to re-run).
 
-    MOTHERDUCK_TOKEN=... uv run --with duckdb==1.5.6 deploy.py [--no-schedules] [--reset-pipelines]
+    MOTHERDUCK_TOKEN=... uv run --with duckdb==1.5.6 --with pytz deploy.py [--no-schedules] [--reset-pipelines]
 """
 import os
 import pathlib

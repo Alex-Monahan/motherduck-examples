@@ -41,10 +41,10 @@ each step the fixer took.
 
 ## Run it
 
-1. Add your OpenRouter key as a Flight secret (DuckDB CLI):
+1. Add your OpenRouter key as a Flight secret (DuckDB CLI 1.5.6 or newer):
 
    ```sql
-   CREATE SECRET openrouter IN motherduck (TYPE flights, PARAMS MAP {'OPENROUTER_API_KEY': getenv('OPENROUTER_API_KEY')});
+   CREATE OR REPLACE SECRET openrouter IN motherduck (TYPE flights, PARAMS MAP {'OPENROUTER_API_KEY': getenv('OPENROUTER_API_KEY')});
    ```
 
 2. Deploy (from the repo root):
@@ -62,8 +62,9 @@ each step the fixer took.
    SELECT * FROM MD_RUN_FLIGHT(flight_id := getvariable('w'));
    ```
 
-4. Open the **Self-healing Flights** Dive. Within a few checker runs the incident goes
-   `open → investigating → merged → verifying → resolved`.
+4. Open the **Self-healing Flights** Dive. In about three checker runs (~15 minutes) the incident goes
+   `open → investigating → merged → verifying → resolved`. The simulated API change stays on; the fixed
+   code handles the new shape.
 
 To undo the fix, roll the pipeline Flight back to an earlier version in the Flights UI. Re-running `deploy.py`
 leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-pipelines` restores the original code.
@@ -72,7 +73,7 @@ leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-
 
 | Knob | Where | Default |
 |---|---|---|
-| Your pipeline | `PIPELINES` in `checker_flight.py`, `PIPELINE_FLIGHTS` in `fixer_flight.py` | `heal-demo-weather` |
+| Your pipelines | `PIPELINES` in `checker_flight.py` | `heal-demo-weather`, `heal-demo-hourly` |
 | Fixer and approver models | Fixer config `MODEL`, `APPROVER_MODEL` | Claude Opus latest, GPT Sol latest |
 | Budget per fix | Fixer config `BUDGET_USD` | `10` |
 | Approver retries | Fixer config `APPROVER_ROUNDS` | `2` |
