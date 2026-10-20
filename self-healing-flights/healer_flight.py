@@ -274,8 +274,7 @@ def act(inc, kind, command, verdict, detail=None, ts=None):
 
 
 def run_sandbox(inc, label):
-    # Run the working copy against a fresh zero-copy clone of the data, with the pipeline Flight's own config.
-    # Create the clone on the long-lived connection: a just-closed connection's new database is not always visible to the next one yet.
+    # Run the working copy against a fresh zero-copy clone (made on the long-lived connection, so the subprocess can see it).
     db(f"DROP DATABASE IF EXISTS {inc.sandbox}")
     db(f"CREATE DATABASE {inc.sandbox} FROM heal_demo")
     env = {**{k: os.environ[k] for k in ("PATH", "HOME", "MOTHERDUCK_TOKEN") if k in os.environ}, **inc.config,
