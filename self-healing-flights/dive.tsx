@@ -30,7 +30,7 @@ const T = {
 const H = '"heal_board"."main"';
 const GH = 'https://github.com/Alex-Monahan/self-healing-pipelines';
 // Expected heartbeat intervals in minutes (red when older than 2x)
-const HB_EXPECTED_MIN: Record<string, number> = { checker: 15, watchdog: 15 };
+const HB_EXPECTED_MIN: Record<string, number> = { checker: 5, watchdog: 15 };
 
 type Row = Record<string, unknown>;
 const N = (v: unknown): number => (v == null ? 0 : Number(v));
@@ -206,7 +206,7 @@ SELECT
   (SELECT count(*) FROM inc WHERE status = 'proposed')::INT AS n_prop,
   (SELECT count(*) FROM inc WHERE status = 'resolved')::INT AS n_res,
   (SELECT count(*) FROM inc)::INT AS n_all,
-  (SELECT epoch_ms(max(ts))::DOUBLE FROM hb WHERE component = 'checker') AS checker_ms,
+  (SELECT epoch_ms(max(ts))::DOUBLE FROM hb WHERE component IN ('healer', 'checker')) AS checker_ms,
   (SELECT epoch_ms(max(ts))::DOUBLE FROM hb WHERE component = 'watchdog') AS watchdog_ms,
   (SELECT any_value(value) FROM ctl WHERE key = 'kill_switch') AS kill_switch,
   (SELECT any_value(value) FROM ctl WHERE key = 'dispatch_paused') AS dispatch_paused,
@@ -235,13 +235,14 @@ SELECT f.component, f.kind, f.run_number::DOUBLE AS run_number, f.status, f.is_s
   epoch_ms(f.created_at)::DOUBLE AS created_ms, epoch_ms(f.started_at)::DOUBLE AS started_ms,
   epoch_ms(f.ended_at)::DOUBLE AS ended_ms, f.sha,
   CASE WHEN f.status = 'RUNNING' THEN (SELECT epoch_ms(max(h.ts))::DOUBLE FROM ${H}."heartbeats" h
-    WHERE h.component = f.component AND h.run_number = f.run_number AND (h.detail->>'phase') = 'end') END AS hb_end_ms,
+    WHERE h.component = f.component AND h.run_number = f.run_number AND (h.detail->>'phase') IN ('end', 'done')) END AS hb_end_ms,
   coalesce(fr.incident_id, TRY_CAST(f.config->>'INCIDENT_ID' AS BIGINT))::DOUBLE AS incident_id,
   fr.fixer_run_id, f.config->>'MODE' AS mode, f.config->>'ATTEMPT' AS attempt, fr.outcome,
   EXISTS (SELECT 1 FROM ${H}."incidents" i
           WHERE i.incident_id = coalesce(fr.incident_id, TRY_CAST(f.config->>'INCIDENT_ID' AS BIGINT))) AS inc_exists
 FROM ${H}."flight_runs" f
-LEFT JOIN ${H}."fixer_runs" fr ON f.component = 'fixer' AND fr.flight_run_number = f.run_number
+LEFT JOIN (SELECT flight_run_number, min(incident_id) AS incident_id, min(fixer_run_id) AS fixer_run_id, min(outcome) AS outcome
+           FROM ${H}."fixer_runs" GROUP BY ALL) fr ON f.component IN ('fixer', 'healer') AND fr.flight_run_number = f.run_number
 ORDER BY f.component, f.run_number`;
 
 const INC_SQL = `
@@ -274,7 +275,7 @@ SELECT fr.fixer_run_id, fr.attempt::DOUBLE AS attempt, fr.flight_run_number::DOU
   fr.approver_rounds::DOUBLE AS approver_rounds, fr.outcome, fr.branch, fr.pr_number::DOUBLE AS pr_number,
   fr.summary->>'symptoms' AS symptoms, fr.summary->>'root_cause' AS root_cause, fr.summary->>'fix' AS fix,
   fr.summary->>'verification' AS verification, fr.summary->>'approver_notes' AS approver_notes,
-  (SELECT any_value(f.status) FROM ${H}."flight_runs" f WHERE f.component = 'fixer' AND f.run_number = fr.flight_run_number) AS flight_status
+  (SELECT any_value(f.status) FROM ${H}."flight_runs" f WHERE f.component IN ('fixer', 'healer') AND f.run_number = fr.flight_run_number) AS flight_status
 FROM ${H}."fixer_runs" fr WHERE fr.incident_id = ${id}
 UNION ALL BY NAME
 SELECT 'run-' || f.run_number::VARCHAR AS fixer_run_id, TRY_CAST(f.config->>'ATTEMPT' AS DOUBLE) AS attempt,
@@ -851,10 +852,12 @@ function PipelineDag({
 	const hPos: Record<string, { x: number; y: number }> = Object.fromEntries(hOrder.map((n, i) => [n, { x: 4 + i * (hW + 70), y: laneY + 18 }]));
 	const W = Math.max(4 + (maxD + 1) * (nodeW + gapX) - gapX + 8, 4 + hOrder.length * (hW + 70));
 	const Hh = laneY + 18 + hH + 8;
-	const healerEdges: [string, string, string][] = [
-		['watchdog', 'checker', 'keeps alive'],
-		['checker', 'fixer', 'dispatches'],
-	];
+	const healerEdges: [string, string, string][] = (
+		[
+			['watchdog', 'checker', 'keeps alive'],
+			['checker', 'fixer', 'dispatches'],
+		] as [string, string, string][]
+	).filter(([a, b]) => hOrder.includes(a) && hOrder.includes(b));
 	const node = (name: string, x: number, y: number, w: number, hgt: number, small: boolean) => {
 		const runs = runsBy[name] ?? [];
 		const last = runs[runs.length - 1];
@@ -1040,7 +1043,6 @@ function HealthStrip({ q, now }: { q: ReturnType<typeof useSQLQuery>; now: numbe
 		return { text: ms == null ? 'no heartbeat' : ago(ms, now), stale };
 	};
 	const ck = hb('checker');
-	const wd = hb('watchdog');
 	const kill = S(r.kill_switch);
 	const paused = S(r.dispatch_paused);
 	const tiles: { label: string; value: string; color?: string; sub?: string }[] = [
@@ -1048,8 +1050,7 @@ function HealthStrip({ q, now }: { q: ReturnType<typeof useSQLQuery>; now: numbe
 		{ label: 'Investigating', value: String(N(r.n_inv)), color: N(r.n_inv) ? T.blue : undefined },
 		{ label: 'Verifying', value: String(N(r.n_ver)), color: N(r.n_ver) ? T.teal : undefined, sub: N(r.n_prop) ? `${N(r.n_prop)} proposed` : undefined },
 		{ label: 'Escalated', value: String(N(r.n_esc)), color: N(r.n_esc) ? T.orange : undefined, sub: `${N(r.n_res)} resolved of ${N(r.n_all)}` },
-		{ label: 'Checker heartbeat', value: ck.text, color: ck.stale ? T.red : T.green, sub: `expected ≤ ${HB_EXPECTED_MIN.checker}m` },
-		{ label: 'Watchdog heartbeat', value: wd.text, color: wd.stale ? T.red : T.green, sub: `expected ≤ ${HB_EXPECTED_MIN.watchdog}m` },
+		{ label: 'Healer heartbeat', value: ck.text, color: ck.stale ? T.red : T.green, sub: `every run, ≤ ${HB_EXPECTED_MIN.checker}m apart` },
 		{
 			label: 'Kill switch',
 			value: kill || '–',

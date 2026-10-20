@@ -2,9 +2,10 @@
 title: Self-Healing Pipelines With MotherDuck Flights
 id: self-healing-flights
 description: >-
-  Four MotherDuck Flights that run a pipeline, notice when it breaks, fix it with
-  an AI coding agent in a zero-copy sandbox, get a second model to approve the
-  fix, and ship it as a new Flight version, plus a Dive that shows every step.
+  One healer Flight that notices when your pipeline Flights break, fixes them in
+  parallel with AI coding agents in zero-copy sandboxes, gets a second model to
+  approve each fix, and ships it as a new Flight version, plus a Dive that shows
+  every step.
   Use when you want pipelines that repair upstream changes on their own.
 type: example
 category: automation
@@ -21,21 +22,19 @@ published_date: 2026-10-19
 
 # Self-Healing Pipelines With MotherDuck Flights
 
-A pipeline Flight loads weather data. When it breaks, a checker Flight opens an
-incident, a fixer Flight repairs the code with an AI agent, and the fix ships as
-a new version of the pipeline Flight. A Dive shows the pipeline, the runs, and
-each step the fixer took.
+Two pipeline Flights load weather data. A single healer Flight runs every 5 minutes: when a pipeline
+breaks, it opens an incident, repairs the code with AI agents (one per incident, in parallel), and
+ships the fix as a new version of the pipeline Flight. A Dive shows the pipelines, the runs, and each
+step of every fix.
 
 ## How it works
 
 | File | What it does |
 |---|---|
 | `pipeline_flight.py` | Loads the NWS daily forecast and fails if a data test fails. |
-| `hourly_flight.py` | A second pipeline (NWS hourly temperatures) that breaks the same way, so the fixer can reuse what it learned. |
-| `checker_flight.py` | Finds failed runs, classifies them with `prompt_jev` (an LLM only when Jev is unsure), opens incidents, starts the fixer, confirms the fix on the next runs, and writes a MotherDuck Guide. |
-| `fixer_flight.py` | Reproduces the failure in a zero-copy clone, runs opencode + Claude to edit the pipeline, asks GPT to approve, then saves the fix with `MD_UPDATE_FLIGHT`. |
-| `watchdog_flight.py` | Restarts the checker if it stops, and cancels fixers when the kill switch is on. |
-| `dive.tsx` | The status board: pipeline graph, run history, incidents, and the fixer's steps. |
+| `hourly_flight.py` | A second pipeline (NWS hourly temperatures) that breaks the same way, so the healer can reuse what it learned. |
+| `healer_flight.py` | Every 5 minutes: exits if another healer run is still alive (and cancels one that is stuck), turns failed runs into incidents with `prompt_jev` (an LLM only when Jev is unsure), reproduces each failure in a zero-copy clone, has opencode + Claude fix all incidents at once with one subagent each, asks GPT to approve each fix, saves it with `MD_UPDATE_FLIGHT`, confirms it on the next runs, and writes a MotherDuck Guide. |
+| `dive.tsx` | The status board: pipeline graph, run history, incidents, and each step of every fix. |
 | `schema.sql` | The `heal` database the Flights write and the Dive reads. |
 | `deploy.py` | Creates or updates everything above. |
 
@@ -62,7 +61,7 @@ each step the fixer took.
    SELECT * FROM MD_RUN_FLIGHT(flight_id := getvariable('w'));
    ```
 
-4. Open the **Self-healing Flights** Dive. In about three checker runs (~15 minutes) the incident goes
+4. Open the **Self-healing Flights** Dive. In about three healer runs (~15 minutes) the incident goes
    `open → investigating → merged → verifying → resolved`. The simulated API change stays on; the fixed
    code handles the new shape.
 
@@ -73,17 +72,17 @@ leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-
 
 | Knob | Where | Default |
 |---|---|---|
-| Your pipelines | `PIPELINES` in `checker_flight.py` | `heal-demo-weather`, `heal-demo-hourly` |
-| Fixer and approver models | Fixer config `MODEL`, `APPROVER_MODEL` | Claude Opus latest, GPT Sol latest |
-| Budget per fix | Fixer config `BUDGET_USD` | `10` |
-| Approver retries | Fixer config `APPROVER_ROUNDS` | `2` |
+| Your pipelines | `PIPELINES` in `healer_flight.py` | `heal-demo-weather`, `heal-demo-hourly` |
+| Fixer and approver models | Healer config `MODEL`, `APPROVER_MODEL` | Claude Opus latest, GPT Sol latest |
+| Budget per incident | Healer config `BUDGET_USD` | `10` |
+| Approver retries | Healer config `APPROVER_ROUNDS` | `2` |
 | Autonomy | `heal.main.control` key `autonomy_cap` (`L1` ships the fix, `L3` only proposes it) | `L1` |
 | Kill switch, daily spend cap | `heal.main.control` keys `kill_switch`, `daily_spend_cap_usd` | `off`, `20` |
-| Schedules | `deploy.py` (`--no-schedules` to skip) | checker every 5 min |
+| Schedules | `deploy.py` (`--no-schedules` to skip) | healer every 5 min |
 
 ## Caveats
 
-- The fixer edits pipeline code and ships it. Start with `autonomy_cap = 'L3'` so a
+- The healer edits pipeline code and ships it. Start with `autonomy_cap = 'L3'` so a
   human reviews each fix.
 - Each fix costs real LLM money (about $0.20 to $2 here). Keep the budget and spend cap.
 - Disable the schedules when you are done: `deploy.py --no-schedules`.
@@ -91,8 +90,8 @@ leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-
 
 ## Security
 
-- The agent never holds a MotherDuck token. Its only tool is `verify`, served by the
-  fixer, which runs the pipeline against a sandbox clone.
+- The agents never hold a MotherDuck token. Their only tool is `verify`, served by the
+  healer, which runs the pipeline against a sandbox clone.
 - A second model approves every fix from the diff and the test evidence alone.
 - Upstream text is treated as data, never as instructions.
 

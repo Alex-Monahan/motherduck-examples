@@ -1,4 +1,4 @@
-"""Create or update the schema, the four Flights and the Dive (all resolved by name, so it is safe to re-run).
+"""Create or update the schema, the three Flights and the Dive (all resolved by name, so it is safe to re-run).
 
     MOTHERDUCK_TOKEN=... uv run --with duckdb==1.5.6 --with pytz deploy.py [--no-schedules] [--reset-pipelines]
 """
@@ -14,10 +14,10 @@ SCHEDULES = "--no-schedules" not in sys.argv
 FLIGHTS = {
     "heal-demo-weather": ("pipeline_flight.py", "0 * * * *", {"NWS_FEATURE_FLAGS": ""}, 600),
     "heal-demo-hourly": ("hourly_flight.py", "30 * * * *", {"NWS_FEATURE_FLAGS": ""}, 600),
-    "heal-demo-checker": ("checker_flight.py", "*/5 * * * *", {"GREEN_RUNS": "2", "MAX_ATTEMPTS": "2"}, 600),
-    "heal-demo-fixer": ("fixer_flight.py", None, {"INCIDENT_ID": "0", "ATTEMPT": "1", "BUDGET_USD": "10", "APPROVER_ROUNDS": "2",
-                                                    "MODEL": "~anthropic/claude-opus-latest", "APPROVER_MODEL": "~openai/gpt-sol-latest"}, 2700),
-    "heal-demo-watchdog": ("watchdog_flight.py", "7-59/15 * * * *", {"STALE_MINUTES": "30"}, 300),
+    "heal-demo-healer": ("healer_flight.py", "*/5 * * * *", {"GREEN_RUNS": "2", "MAX_ATTEMPTS": "2", "STALE_MINUTES": "3", "BUDGET_USD": "10",
+                                                             "APPROVER_ROUNDS": "2", "MODEL": "~anthropic/claude-opus-latest",
+                                                             "COORDINATOR_MODEL": "~openai/gpt-luna-latest",
+                                                             "APPROVER_MODEL": "~openai/gpt-sol-latest"}, 2700),
 }
 
 # DuckDB prefers a lowercase motherduck_token over MOTHERDUCK_TOKEN, so refuse to guess which account to deploy to.
