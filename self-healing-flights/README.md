@@ -33,7 +33,7 @@ step of every fix.
 |---|---|
 | `pipeline_flight.py` | Loads the NWS daily forecast and fails if a data test fails. |
 | `hourly_flight.py` | A second pipeline (NWS hourly temperatures) that breaks the same way, so the healer can reuse what it learned. |
-| `healer_flight.py` | Every 5 minutes: exits if another healer run is still alive (and cancels one that is stuck), turns failed runs into incidents with `prompt_jev` (an LLM only when Jev is unsure), reproduces each failure in a zero-copy clone, has opencode + Claude fix all incidents at once with one subagent each, asks GPT to approve each fix, saves it with `MD_UPDATE_FLIGHT`, confirms it on the next runs, and writes a MotherDuck Guide. |
+| `healer_flight.py` | Every 5 minutes: exits if another healer run is still alive (and cancels one that is stuck), turns failed runs into incidents with `prompt_jev` (an LLM only when Jev is unsure), reproduces each failure in a zero-copy clone, has opencode + Claude fix all incidents at once with one subagent each, asks GPT to approve each fix, ships it with `MD_UPDATE_FLIGHT`, confirms it on the next runs, and writes a MotherDuck Guide. |
 | `dive.tsx` | The status board: pipeline graph, run history, incidents, and each step of every fix. |
 | `schema.sql` | The `heal` database the Flights write and the Dive reads. |
 | `deploy.py` | Creates or updates everything above. |
@@ -62,8 +62,8 @@ step of every fix.
    ```
 
 4. Open the **Self-healing Flights** Dive. In about three healer runs (~15 minutes) the incident goes
-   `open → investigating → merged → verifying → resolved`. The simulated API change stays on; the fixed
-   code handles the new shape.
+   `open → investigating → verifying → resolved`. The simulated API change stays on; the fixed code
+   handles the new shape.
 
 To undo the fix, roll the pipeline Flight back to an earlier version in the Flights UI. Re-running `deploy.py`
 leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-pipelines` restores the original code.
@@ -73,7 +73,7 @@ leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-
 | Knob | Where | Default |
 |---|---|---|
 | Your pipelines | `PIPELINES` in `healer_flight.py` | `heal-demo-weather`, `heal-demo-hourly` |
-| Fixer and approver models | Healer config `MODEL`, `APPROVER_MODEL` | Claude Opus latest, GPT Sol latest |
+| Fixer, approver and coordinator models | Healer config `MODEL`, `APPROVER_MODEL`, `COORDINATOR_MODEL` | Claude Opus latest, GPT Sol latest, GPT Luna latest |
 | Budget per incident | Healer config `BUDGET_USD` | `10` |
 | Approver retries | Healer config `APPROVER_ROUNDS` | `2` |
 | Autonomy | `heal.main.control` key `autonomy_cap` (`L1` ships the fix, `L3` only proposes it) | `L1` |

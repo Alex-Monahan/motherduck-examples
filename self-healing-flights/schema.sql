@@ -20,10 +20,10 @@ CREATE TABLE IF NOT EXISTS heal.main.incidents (
     incident_id BIGINT PRIMARY KEY DEFAULT nextval('incident_seq'), created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(), status VARCHAR, pipeline VARCHAR, pipelines VARCHAR[], class VARCHAR,
     category VARCHAR, disposition VARCHAR, severity VARCHAR, level VARCHAR, title VARCHAR, fingerprint VARCHAR,
-    event_count INTEGER DEFAULT 1, last_event_at TIMESTAMPTZ, lease_expires TIMESTAMPTZ, attempts INTEGER DEFAULT 0,
+    event_count INTEGER DEFAULT 1, last_event_at TIMESTAMPTZ, attempts INTEGER DEFAULT 0,
     cost_usd DOUBLE DEFAULT 0, gh_issue INTEGER, gh_pr INTEGER, fix_sha VARCHAR, merged_at TIMESTAMPTZ,
     green_runs INTEGER DEFAULT 0, red_runs INTEGER DEFAULT 0, muted BOOLEAN DEFAULT false, guide_id UUID, resolved_at TIMESTAMPTZ,
-    scenario VARCHAR, notes VARCHAR, resource VARCHAR, root_id BIGINT, first_sha VARCHAR, lease_owner VARCHAR
+    scenario VARCHAR, notes VARCHAR, resource VARCHAR, root_id BIGINT, first_sha VARCHAR
 );
 CREATE TABLE IF NOT EXISTS heal.main.incident_transitions (
     incident_id BIGINT, ts TIMESTAMPTZ DEFAULT now(), from_status VARCHAR, to_status VARCHAR, reason VARCHAR, actor VARCHAR
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS heal.main.fixer_runs (
 CREATE TABLE IF NOT EXISTS heal.main.actions (
     fixer_run_id VARCHAR, seq INTEGER, ts TIMESTAMPTZ DEFAULT now(), kind VARCHAR, command VARCHAR, verdict VARCHAR, detail JSON
 );
-CREATE TABLE IF NOT EXISTS heal.main.processed_runs (flight_id UUID, run_number BIGINT, PRIMARY KEY (flight_id, run_number));
+-- Recent runs of every Flight (the Dive reads these; a pipeline run listed here as finished has been checked).
 CREATE TABLE IF NOT EXISTS heal.main.flight_runs (
     component VARCHAR, kind VARCHAR, flight_id UUID, run_number BIGINT, status VARCHAR, is_scheduled BOOLEAN,
     created_at TIMESTAMPTZ, started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ, sha VARCHAR, config JSON, snapshot_at TIMESTAMPTZ,
@@ -51,10 +51,6 @@ CREATE TABLE IF NOT EXISTS heal.main.heartbeats (component VARCHAR, ts TIMESTAMP
 CREATE TABLE IF NOT EXISTS heal.main.control (key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMPTZ DEFAULT now(), updated_by VARCHAR);
 INSERT OR IGNORE INTO heal.main.control (key, value, updated_by) VALUES
     ('kill_switch', 'off', 'setup'), ('autonomy_cap', 'L1', 'setup'), ('daily_spend_cap_usd', '20', 'setup');
-CREATE TABLE IF NOT EXISTS heal.main.classifications (
-    ts TIMESTAMPTZ DEFAULT now(), task VARCHAR, subject VARCHAR, label VARCHAR, confidence DOUBLE,
-    jev_label VARCHAR, jev_confidence DOUBLE, fallback_ran BOOLEAN, fallback_label VARCHAR, model VARCHAR, cost_usd DOUBLE
-);
 CREATE TABLE IF NOT EXISTS heal.main.guide_index (
     guide_id UUID PRIMARY KEY, version INTEGER, topic VARCHAR, category VARCHAR, fingerprint VARCHAR, class VARCHAR,
     pipeline VARCHAR, outcome VARCHAR, incident_id BIGINT, title VARCHAR, description VARCHAR, embedding FLOAT[512],
