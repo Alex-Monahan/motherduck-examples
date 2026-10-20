@@ -52,7 +52,7 @@ def transition(inc_id, to, reason, **fields):
 
 def normalize(msg):
     # Mask the parts of a message that change between runs so repeats share a fingerprint.
-    msg = re.sub(r"\[\(.*", "", msg)
+    msg = re.split(r";\s*sample", msg)[0]
     return re.sub(r"\d+(\.\d+)?", "<n>", msg)[:400]
 
 

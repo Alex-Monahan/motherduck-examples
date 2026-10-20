@@ -47,16 +47,17 @@ each step the fixer took.
    CREATE SECRET openrouter IN motherduck (TYPE flights, PARAMS MAP {'OPENROUTER_API_KEY': getenv('OPENROUTER_API_KEY')});
    ```
 
-2. Deploy:
+2. Deploy (from the repo root):
 
    ```bash
+   cd self-healing-flights
    MOTHERDUCK_TOKEN=... uv run --with duckdb==1.5.6 --with pytz deploy.py
    ```
 
 3. Break the pipeline on purpose. This makes the weather API send a new payload shape:
 
    ```sql
-   SET VARIABLE w = (SELECT flight_id FROM MD_LIST_FLIGHTS(owner_only := true) WHERE flight_name = 'heal-demo-weather');
+   SET VARIABLE w = (SELECT flight_id FROM MD_LIST_FLIGHTS() WHERE flight_name = 'heal-demo-weather');
    SELECT * FROM MD_UPDATE_FLIGHT(flight_id := getvariable('w'), config := MAP {'NWS_FEATURE_FLAGS': 'forecast_temperature_qv'});
    SELECT * FROM MD_RUN_FLIGHT(flight_id := getvariable('w'));
    ```
@@ -64,7 +65,8 @@ each step the fixer took.
 4. Open the **Self-healing Flights** Dive. Within a few checker runs the incident goes
    `open → investigating → merged → verifying → resolved`.
 
-To undo the fix, roll the pipeline Flight back to an earlier version in the Flights UI.
+To undo the fix, roll the pipeline Flight back to an earlier version in the Flights UI. Re-running `deploy.py`
+leaves existing pipeline Flights alone (so it never overwrites a fix); `--reset-pipelines` restores the original code.
 
 ## What you'll adjust
 
@@ -96,4 +98,4 @@ To undo the fix, roll the pipeline Flight back to an earlier version in the Flig
 ## Learn more
 
 - Flights and Dives guides: `get_flight_guide`, `get_dive_guide`.
-- Guides: resolved incidents are stored under the `self-healing/incidents/<category>` topic (`MD_LIST_GUIDES`).
+- Guides: resolved incidents are stored under the `self-healing/incidents/<category>` topic (`MD_LIST_GUIDES`, DuckDB 1.5.6+).
