@@ -41,7 +41,7 @@ each step the fixer took.
 
 ## Run it
 
-1. Add your OpenRouter key as a Flight secret (DuckDB CLI 1.5.6 or newer):
+1. Add your OpenRouter key as a Flight secret (DuckDB CLI):
 
    ```sql
    CREATE OR REPLACE SECRET openrouter IN motherduck (TYPE flights, PARAMS MAP {'OPENROUTER_API_KEY': getenv('OPENROUTER_API_KEY')});
