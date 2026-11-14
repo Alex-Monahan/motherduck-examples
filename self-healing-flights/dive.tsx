@@ -2026,14 +2026,14 @@ const Cross = ({ x, y, c = A.ink }: { x: number; y: number; c?: string }) => (
 	<path d={`M${x - 6} ${y - 6} L${x + 6} ${y + 6} M${x + 6} ${y - 6} L${x - 6} ${y + 6}`} fill="none" stroke={c} strokeWidth={3} strokeLinecap="round" />
 );
 
-function Fig({ n, title, caption, h, y0 = 0, children }: { n: string; title: string; caption?: string; h: number; y0?: number; children: React.ReactNode }) {
+function Fig({ n, title, caption, h, y0 = 0, w = 960, children }: { n: string; title: string; caption?: string; h: number; y0?: number; w?: number; children: React.ReactNode }) {
 	return (
 		<figure style={{ margin: '0 0 28px', background: A.paper, border: `2px solid ${A.ink}`, borderRadius: 18, boxShadow: `6px 6px 0 ${A.ink}`, padding: '18px 22px 16px' }}>
 			<div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: A.mono, fontWeight: 700, fontSize: 16, color: A.ink }}>
 				<span style={{ background: A.yellow, border: `2px solid ${A.ink}`, borderRadius: 999, padding: '1px 10px', fontSize: 13 }}>{n}</span>
 				{title}
 			</div>
-			<svg viewBox={`0 ${y0} 960 ${h}`} width="100%" role="img" aria-label={caption ? `${title}. ${caption}` : title} style={{ display: 'block', maxWidth: 1040, margin: '10px auto 0', overflow: 'visible' }}>
+			<svg viewBox={`0 ${y0} ${w} ${h}`} width="100%" role="img" aria-label={caption ? `${title}. ${caption}` : title} style={{ display: 'block', maxWidth: Math.round((1040 * w) / 960), margin: '10px auto 0', overflow: 'visible' }}>
 				{children}
 			</svg>
 			{caption ? <figcaption style={{ fontFamily: A.sans, fontSize: 14, lineHeight: 1.5, color: A.muted, marginTop: 10 }}>{caption}</figcaption> : null}
@@ -2042,9 +2042,10 @@ function Fig({ n, title, caption, h, y0 = 0, children }: { n: string; title: str
 }
 
 // A3: four failed runs flow into Classify, which buckets them into two incidents; each incident gets a zero-copy clone
-// and a fixer, both fixes converge on the reviewer, then Ship, and Learn feeds the next fixes.
+// and a fixer, both fixes converge on the reviewer, Ship sits below it, and Learn feeds the next fixes.
+// Laid out narrow (770 wide) so the text stays readable on a phone.
 function FlowA3() {
-	const C = { x: 194, y: 215, r: 60 };
+	const C = { x: 130, y: 215, r: 60 };
 	const lanes = [120, 310];
 	const edgeAt = (x: number, y: number) => {
 		const dx = x - C.x;
@@ -2053,55 +2054,53 @@ function FlowA3() {
 		return [Math.round((C.x + (dx / d) * C.r) * 10) / 10, Math.round((C.y + (dy / d) * C.r) * 10) / 10];
 	};
 	const errs = [
-		{ y: 95, p: 'weather', lane: 0 },
-		{ y: 175, p: 'weather', lane: 0 },
-		{ y: 255, p: 'hourly', lane: 1 },
-		{ y: 335, p: 'weather', lane: 0 },
+		{ y: 95, lane: 0 },
+		{ y: 175, lane: 0 },
+		{ y: 255, lane: 1 },
+		{ y: 335, lane: 0 },
 	];
+	const CHIP = { x: 12, w: 36, h: 36 };
+	const chipEnd = CHIP.x + CHIP.w;
 	const CYCLE = 6;
-	const INC = { x: 270, w: 120, h: 100 };
+	const INC = { x: 206, w: 120, h: 76 };
 	const outPath = (L: number) => {
 		const [ox, oy] = edgeAt(INC.x, L);
 		return { start: [ox, oy], d: `M${ox} ${oy} Q ${INC.x - 22} ${L} ${INC.x - 6} ${L}`, tail: `Q ${INC.x - 22} ${L} ${INC.x - 6} ${L}` };
 	};
 	const inPath = (y: number) => {
-		const [bx, by] = edgeAt(112, y);
-		return { end: [bx, by], d: `M112 ${y} Q 134 ${y} ${bx} ${by}` };
+		const [bx, by] = edgeAt(chipEnd, y);
+		return { end: [bx, by], d: `M${chipEnd} ${y} Q ${chipEnd + 22} ${y} ${bx} ${by}` };
 	};
 	// Each error arrives in its incident at ~92% of its cycle; that incident's dot pops then.
 	const delayOf = (i: number) => i * 1.5;
 	const popDelay = (i: number) => delayOf(i) + CYCLE * 0.92 - CYCLE * 0.03;
 	const dotsByLane = lanes.map((_, li) => errs.map((e, i) => ({ e, i })).filter((x) => x.e.lane === li));
-	const CL = { x: 476, w: 128, h: 130 };
-	const FX = { x: 566, w: 120, h: 116 };
-	const RV = { x: 734, y: 149, w: 104, h: 132 };
+	const CL = { x: 412, w: 128, h: 130 };
+	const FX = { x: 502, w: 92, h: 116 };
+	// Review on top and Ship below it, in one column as tall as the two fixers
+	const RV = { x: 654, y: lanes[0] - FX.h / 2, w: 104, h: 132 };
 	const rc = RV.x + RV.w / 2;
-	const SH = { x: 864, y: 149, w: 90, h: 132 };
-	const sc = SH.x + SH.w / 2;
+	const SH = { x: RV.x, y: lanes[1] + FX.h / 2 - 132, w: RV.w, h: 132 };
 	const mid = RV.y + RV.h / 2;
-	const enter = [180, 250];
-	const fixToReview = (L: number, li: number) => `M${FX.x + FX.w + 6} ${L} C ${FX.x + FX.w + 30} ${L}, ${RV.x - 28} ${enter[li]}, ${RV.x - 6} ${enter[li]}`;
+	const enter = [lanes[0], RV.y + RV.h - 22];
+	const fixToReview = (L: number, li: number) => `M${FX.x + FX.w + 6} ${L} C ${FX.x + FX.w + 34} ${L}, ${RV.x - 30} ${enter[li]}, ${RV.x - 6} ${enter[li]}`;
 	const bottomFixer = FX.x + FX.w / 2;
 	const fixerBottom = lanes[1] + FX.h / 2 + 6;
-	const LE = { cx: 770, cy: 428, w: 128, h: 60 };
-	const shipOut = `M${sc} ${SH.y + SH.h + 6} C ${sc} 400, ${sc - 30} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy}`;
-	const toFixer = `M${LE.cx - LE.w / 2 - 6} ${LE.cy} C ${bottomFixer + 40} ${LE.cy}, ${bottomFixer} ${LE.cy - 10}, ${bottomFixer} ${fixerBottom}`;
-	const loopTok = `M${rc} ${mid} L${sc} ${mid} L${sc} ${SH.y + SH.h + 6} C ${sc} 400, ${sc - 30} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy} L${LE.cx - LE.w / 2 - 6} ${LE.cy} C ${bottomFixer + 40} ${LE.cy}, ${bottomFixer} ${LE.cy - 10}, ${bottomFixer} ${fixerBottom}`;
+	// Learn sits under the bottom fixer: Ship feeds it, and it feeds that fixer from below
+	const LE = { cx: bottomFixer, cy: 446, w: 128, h: 60 };
+	const shipBottom = SH.y + SH.h + 6;
+	const shipOut = `M${rc} ${shipBottom} C ${rc} ${LE.cy - 16}, ${rc - 20} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy}`;
+	const toFixer = `M${LE.cx} ${LE.cy - LE.h / 2 - 6} L${bottomFixer} ${fixerBottom}`;
+	const loopTok = `M${rc} ${mid} L${rc} ${shipBottom} C ${rc} ${LE.cy - 16}, ${rc - 20} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy} L${LE.cx} ${LE.cy} L${bottomFixer} ${fixerBottom}`;
 	const sub = { s: 15, w: 400, f: 'sans' as const };
 	return (
-		<Fig n="A3" title="Four errors, two incidents, fixed side by side" y0={34} h={440}>
+		<Fig n="A3" title="Four errors, two incidents, fixed side by side" y0={50} h={436} w={770}>
 			<Defs p="a3" />
-			<Tx x={62} y={60} s={16} w={500} f="sans" c={A.muted}>
-				4 failed runs
-			</Tx>
 			{errs.map((e) => (
 				<g key={`c${e.y}`}>
 					<Edge p="a3" d={inPath(e.y).d} />
-					<Card x={12} y={e.y - 18} w={100} h={36} r={18} shadow={3} fill={A.coralSoft} />
-					<Cross x={27} y={e.y} />
-					<Tx x={40} y={e.y + 5} s={15} a="start">
-						{e.p}
-					</Tx>
+					<Card x={CHIP.x} y={e.y - CHIP.h / 2} w={CHIP.w} h={CHIP.h} r={18} shadow={3} fill={A.coralSoft} />
+					<Cross x={CHIP.x + CHIP.w / 2} y={e.y} />
 				</g>
 			))}
 			{lanes.map((L) => (
@@ -2123,20 +2122,14 @@ function FlowA3() {
 			</Tx>
 			{/* Work flowing down each lane and around the loop, hidden behind the shapes so it shows in the gaps */}
 			{lanes.map((L, li) => (
-				<Tok key={`w${L}`} d={`M${INC.x + INC.w + 4} ${L} L${FX.x + FX.w + 6} ${L} C ${FX.x + FX.w + 30} ${L}, ${RV.x - 28} ${enter[li]}, ${RV.x - 6} ${enter[li]}`} dur={4} delay={li * 0.6 + 1} c={A.yellow} r={7} />
+				<Tok key={`w${L}`} d={`M${INC.x + INC.w + 4} ${L} L${FX.x + FX.w + 6} ${L} C ${FX.x + FX.w + 34} ${L}, ${RV.x - 30} ${enter[li]}, ${RV.x - 6} ${enter[li]}`} dur={4} delay={li * 0.6 + 1} c={A.yellow} r={7} />
 			))}
 			<Tok d={loopTok} dur={6} delay={2} c={A.tealSoft} r={7} />
 			{lanes.map((L, li) => (
 				<g key={`l${L}`}>
 					<Card x={INC.x} y={L - INC.h / 2} w={INC.w} h={INC.h} fill={A.coralSoft} />
-					<Tx x={INC.x + INC.w / 2} y={L - 23} s={17}>
+					<Tx x={INC.x + INC.w / 2} y={L - 6} s={17}>
 						{`incident ${li + 1}`}
-					</Tx>
-					<Tx x={INC.x + INC.w / 2} y={L - 2} {...sub}>
-						{li ? 'Hourly' : 'Weather'}
-					</Tx>
-					<Tx x={INC.x + INC.w / 2} y={L + 16} {...sub}>
-						pipeline
 					</Tx>
 					{dotsByLane[li].map(({ i }, k) => {
 						const n = dotsByLane[li].length;
@@ -2144,7 +2137,7 @@ function FlowA3() {
 							<circle
 								key={i}
 								cx={INC.x + INC.w / 2 + (k - (n - 1) / 2) * 16}
-								cy={L + 34}
+								cy={L + 18}
 								r={5.5}
 								fill={A.coral}
 								stroke={A.ink}
@@ -2200,19 +2193,19 @@ function FlowA3() {
 			<Tx x={rc} y={RV.y + 120} {...sub}>
 				approves
 			</Tx>
-			<Edge p="a3" d={`M${RV.x + RV.w + 6} ${mid} L${SH.x - 5} ${mid}`} />
+			<Edge p="a3" d={`M${rc} ${RV.y + RV.h + 6} L${rc} ${SH.y - 5}`} />
 			<Card x={SH.x} y={SH.y} w={SH.w} h={SH.h} fill={A.white} />
-			<Ic I={Rocket} x={sc} y={SH.y + 26} s={26} />
-			<Tx x={sc} y={SH.y + 62} s={18}>
+			<Ic I={Rocket} x={rc} y={SH.y + 26} s={26} />
+			<Tx x={rc} y={SH.y + 62} s={18}>
 				ship
 			</Tx>
-			<Tx x={sc} y={SH.y + 84} {...sub}>
+			<Tx x={rc} y={SH.y + 84} {...sub}>
 				Ship or
 			</Tx>
-			<Tx x={sc} y={SH.y + 102} {...sub}>
+			<Tx x={rc} y={SH.y + 102} {...sub}>
 				alert a
 			</Tx>
-			<Tx x={sc} y={SH.y + 120} {...sub}>
+			<Tx x={rc} y={SH.y + 120} {...sub}>
 				human
 			</Tx>
 			<Edge p="a3" d={shipOut} />
