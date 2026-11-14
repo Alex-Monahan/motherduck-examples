@@ -2045,8 +2045,8 @@ function Fig({ n, title, caption, h, y0 = 0, w = 960, children }: { n: string; t
 // and a fixer, both fixes converge on the reviewer, Ship sits below it, and Learn feeds the next fixes.
 // Laid out narrow (850 wide, text at 19-23 px) so the text stays readable on a phone.
 function FlowA3() {
-	const C = { x: 144, y: 215, r: 74 };
-	const lanes = [120, 310];
+	const C = { x: 144, y: 227, r: 74 };
+	const lanes = [120, 334]; // the clone cylinders sit 40 px apart
 	const edgeAt = (x: number, y: number) => {
 		const dx = x - C.x;
 		const dy = y - C.y;
@@ -2054,10 +2054,10 @@ function FlowA3() {
 		return [Math.round((C.x + (dx / d) * C.r) * 10) / 10, Math.round((C.y + (dy / d) * C.r) * 10) / 10];
 	};
 	const errs = [
-		{ y: 95, lane: 0 },
-		{ y: 175, lane: 0 },
-		{ y: 255, lane: 1 },
-		{ y: 335, lane: 0 },
+		{ y: 107, lane: 0 },
+		{ y: 187, lane: 0 },
+		{ y: 267, lane: 1 },
+		{ y: 347, lane: 0 },
 	];
 	const CHIP = { x: 12, w: 36, h: 36 };
 	const chipEnd = CHIP.x + CHIP.w;
@@ -2080,21 +2080,21 @@ function FlowA3() {
 	// Review on top and Ship below it, in one column as tall as the two fixers
 	const RV = { x: 714, y: lanes[0] - FX.h / 2, w: 128, h: 146 };
 	const rc = RV.x + RV.w / 2;
-	const SH = { x: RV.x, y: lanes[1] + FX.h / 2 - 146, w: RV.w, h: 146 };
+	const SH = { x: RV.x, y: lanes[1] - 146 / 2, w: RV.w, h: 146 }; // centred on the lower row
 	const mid = RV.y + RV.h / 2;
 	const enter = [lanes[0], RV.y + RV.h - 22];
 	const fixToReview = (L: number, li: number) => `M${FX.x + FX.w + 6} ${L} C ${FX.x + FX.w + 34} ${L}, ${RV.x - 30} ${enter[li]}, ${RV.x - 6} ${enter[li]}`;
 	const bottomFixer = FX.x + FX.w / 2;
 	const fixerBottom = lanes[1] + FX.h / 2 + 6;
 	// Learn sits under the bottom fixer: Ship feeds it, and it feeds that fixer from below
-	const LE = { cx: bottomFixer, cy: 456, w: 140, h: 70 };
+	const LE = { cx: bottomFixer, cy: 480, w: 140, h: 70 };
 	const shipBottom = SH.y + SH.h + 6;
 	const shipOut = `M${rc} ${shipBottom} C ${rc} ${LE.cy - 16}, ${rc - 20} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy}`;
 	const toFixer = `M${LE.cx} ${LE.cy - LE.h / 2 - 6} L${bottomFixer} ${fixerBottom}`;
 	const loopTok = `M${rc} ${mid} L${rc} ${shipBottom} C ${rc} ${LE.cy - 16}, ${rc - 20} ${LE.cy}, ${LE.cx + LE.w / 2 + 6} ${LE.cy} L${LE.cx} ${LE.cy} L${bottomFixer} ${fixerBottom}`;
 	const sub = { s: 19, w: 400, f: 'sans' as const };
 	return (
-		<Fig n="A3" title="Four errors, two incidents, fixed side by side" y0={30} h={475} w={850}>
+		<Fig n="A3" title="Four errors, two incidents, fixed side by side" y0={30} h={499} w={850}>
 			<Defs p="a3" />
 			{errs.map((e) => (
 				<g key={`c${e.y}`}>
